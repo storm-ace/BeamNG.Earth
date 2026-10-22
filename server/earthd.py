@@ -968,7 +968,8 @@ class Server:
         except Exception as e:          # no decks: the graph follows the ground under bridges
             log.debug("navgraph decks: %s: %s", type(e).__name__, e)
         graph = navgraphmod.build(anchor.frame, feats, elev, (x, y), urban, decks=decks, widths=self.road_widths,
-                                  left_hand=self.left_hand(anchor), mph=self.mph(anchor))
+                                  left_hand=self.left_hand(anchor), mph=self.mph(anchor),
+                                  mapped=blockworker.mapped_controls(self.mapdata, anchor.frame, (x - w, y - w, x + w, y + w)))
         cla, clo, _ = anchor.frame.enu_to_geodetic(x, y, 0.0)
         graph["rules"] = navgraphmod.road_rules(navgraphmod.country_near(self.airports_db, float(cla), float(clo)))
         for old in glob.glob(os.path.join(self.out_dir, f"navgraph_{aid}_*.json")):    # one file at a time
@@ -1080,7 +1081,9 @@ class Server:
                                      widths=self.road_widths, props=props, lines=lines, wires=wires, town=town, park=park,
                                      left_hand=self.left_hand(anchor), mph=self.mph(anchor),
                                      structures=buildingsmod.centres(items, tx, ty) if items else (),
-                                     tunnels=anchor.tunnels, walls=rwalls)
+                                     tunnels=anchor.tunnels, walls=rwalls,
+                                     mapped=blockworker.mapped_controls(self.mapdata, anchor.frame, roadsmod.tile_bbox(tx, ty))
+                                     if self.buildings else None)
         if self.airports is not None:   # runway markings, drawn by the road mesh like the lane lines
             chunks += self.airports.tile_chunks(anchor.frame, tx, ty, elev, roadsmod.tile_bbox)
         x0, y0, _, _ = roadsmod.tile_bbox(tx, ty)

@@ -331,13 +331,24 @@ def navgraph(aid, lat, lon, zoom, x, y, out_dir, vfs_dir, serial, left_hand, mph
         log.debug("navgraph decks: %s: %s", type(e).__name__, e)
     urban = _s.surface.urban if _s.surface is not None else None
     graph = navgraphmod.build(frame, feats, elev, (x, y), urban, decks=decks, widths=_s.widths, left_hand=left_hand,
-                              mph=mph)
+                              mph=mph, mapped=mapped_controls(_s.md, frame, (x - w, y - w, x + w, y + w)))
     if getattr(_s, "bgt", None) is not None:    # (--nl-bgt: the kunstwerken stand in the road tiles, their signals too)
         import kunstwerken as kwmod
         kwmod.hide_heads(frame, graph["signals"])
     graph["rules"] = rules
     path = navgraphmod.write(out_dir, vfs_dir, aid, serial, graph)
     return path, len(graph["nodes"]), len(graph["edges"])
+
+
+def mapped_controls(md, frame, box):
+    """furniture.Mapped round box: the mapped signals and signs the junctions there follow (the road tiles' props and
+    the AI graph alike); None where the map data cannot be had (the junction rule, as before)."""
+    import furniture
+    try:
+        return furniture.Mapped.load(md, frame, box)
+    except Exception as e:
+        log.warning("mapped controls: %s: %s", type(e).__name__, e)
+        return None
 
 
 def roads_tile(aid, lat, lon, zoom, tx, ty, out_dir, vfs_dir, sidewalks, lift, buildings=False, left_hand=False,
@@ -377,7 +388,8 @@ def roads_tile(aid, lat, lon, zoom, tx, ty, out_dir, vfs_dir, sidewalks, lift, b
     chunks = roadsmod.build_tile(frame, tx, ty, cells, elev, urban, walks=walks, deck_context=ctx, bridges=bridges, widths=_s.widths,
                                  props=props, lines=lines, wires=wires, town=town, park=park,
                                  left_hand=left_hand, mph=mph, structures=buildingsmod.centres(items, tx, ty) if items else (),
-                                 tunnels=tunnels, walls=rwalls)
+                                 tunnels=tunnels, walls=rwalls,
+                                 mapped=mapped_controls(_s.md, frame, roadsmod.tile_bbox(tx, ty)) if buildings else None)
     if _s.airports is not None:         # runway markings, drawn by the road mesh like the lane lines
         chunks += _s.airports.tile_chunks(frame, tx, ty, elev, roadsmod.tile_bbox)
     x0, y0, _, _ = roadsmod.tile_bbox(tx, ty)
