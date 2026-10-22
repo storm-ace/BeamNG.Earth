@@ -493,6 +493,7 @@ function select(id) {
     html += `<div style="margin-top:4px"><span class="badge" style="color:${v[0]}">${esc(v[1])}</span></div>`;
   }
   html += propsTable(obj);
+  if (obj.layer !== 'sv_shots') html += viewsHTML(obj);
   if (obj.layer === 'sv' && obj.match_id) {
     html += `<div class="row"><button id="btn-match">Naar match: ${esc(obj.match_id)}</button></div>`;
   }
@@ -512,7 +513,74 @@ function select(id) {
     wireShot();
   });
   wireShot();
+  wireViews();
   if (obj.editable) wireEdit(obj);
+}
+
+// Which screenshots see a point: the shot's camera (at, z = ground + 2.5 m, compass heading, pitch, horizontal
+// fov over w px) as a pinhole; the point's pixel from its bearing and elevation. A Street View detection lists
+// its own shots first; any other shot counts when the point falls inside its frame within 90 m.
+function project(sh, p, z) {
+  const dx = p[0] - sh.at[0], dy = p[1] - sh.at[1], dist = Math.hypot(dx, dy);
+  if (dist < 1 || dist > 90) return null;
+  let yaw = Math.atan2(dx, dy) * 180 / Math.PI - sh.heading;
+  yaw = ((yaw + 540) % 360) - 180;
+  if (Math.abs(yaw) >= 80) return null;
+  const f = (sh.w / 2) / Math.tan(sh.fov * Math.PI / 360);
+  const r = yaw * Math.PI / 180, el = Math.atan2((z ?? sh.z) - sh.z, dist) - (sh.pitch || 0) * Math.PI / 180;
+  const u = sh.w / 2 + f * Math.tan(r), v = sh.h / 2 - f * Math.tan(el) / Math.cos(r);
+  if (u < 0 || u > sh.w || v < 0 || v > sh.h) return null;
+  return { u, v, dist };
+}
+
+function viewsFor(obj) {
+  const shots = (state.sv && state.sv.shots) || [];
+  if (!shots.length || !obj.at) return [];
+  const own = (obj.layer === 'sv' && obj.props && obj.props.shots) || [];
+  const out = [];
+  for (const sh of shots) {
+    if (!sh.png) continue;
+    const pr = project(sh, obj.at, obj.z);
+    if (pr) out.push({ sh, ...pr, own: own.includes(sh.id) });
+  }
+  out.sort((a, b) => (b.own - a.own) || (a.dist - b.dist));
+  return out.slice(0, 8);
+}
+
+function viewsHTML(obj) {
+  const vs = viewsFor(obj);
+  if (!vs.length) return (state.sv && state.sv.shots && state.sv.shots.length)
+    ? '<div class="muted small" style="margin-top:6px">Geen Street View-opname ziet dit punt.</div>' : '';
+  // a wide crop: Street View's camera position is 1–3 m off, so near objects land well away from the mark
+  const place = encodeURIComponent(state.sv.place), k = 1.3, cw = 124, ch = 104;
+  return '<div class="views-head">Street View (' + vs.length + ')</div><div class="views">' + vs.map((x) => {
+    const url = `/api/sv/shot/${place}/${encodeURIComponent(x.sh.id)}.png`;
+    const bx = -(x.u * k - cw / 2), by = -(x.v * k - ch / 2);
+    return `<div class="crop${x.own ? ' own' : ''}" data-url="${url}" data-u="${x.u}" data-v="${x.v}" data-w="${x.sh.w}" data-h="${x.sh.h}" data-id="${esc(x.sh.id)}"` +
+      ` title="${esc(x.sh.id)} · ${x.dist.toFixed(0)} m" style="width:${cw}px;height:${ch}px;background-image:url('${url}');` +
+      `background-size:${x.sh.w * k}px ${x.sh.h * k}px;background-position:${bx}px ${by}px"><span>${esc(x.sh.id)} · ${x.dist.toFixed(0)} m</span></div>`;
+  }).join('') + '</div>';
+}
+
+function wireViews() {
+  document.querySelectorAll('#inspector .crop').forEach((c) => c.onclick = () => openShot(c.dataset));
+}
+
+function openShot(d) {
+  let lb = $('#lightbox');
+  if (!lb) {
+    lb = document.createElement('div');
+    lb.id = 'lightbox';
+    document.body.appendChild(lb);
+    lb.onclick = (e) => { if (e.target === lb || e.target.classList.contains('lb-close')) lb.style.display = 'none'; };
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') lb.style.display = 'none'; });
+  }
+  const ann = d.url + '?annotated=1';
+  lb.innerHTML = `<div class="lb-box"><div class="lb-bar"><b>${esc(d.id)}</b>` +
+    `<label class="chk"><input type="checkbox" id="lb-ann"> geannoteerd</label><button class="lb-close">Sluiten (Esc)</button></div>` +
+    `<div class="lb-img"><img src="${d.url}"><div class="lb-mark" style="left:${d.u / d.w * 100}%;top:${d.v / d.h * 100}%"></div></div></div>`;
+  lb.style.display = 'flex';
+  $('#lb-ann').onchange = (e) => { lb.querySelector('img').src = e.target.checked ? ann : d.url; };
 }
 
 function shotHTML(sh, annotated) {

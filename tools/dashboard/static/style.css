@@ -61,3 +61,19 @@ footer.collapsed #log { display: none; }
   :root:not([data-theme="dark"]) { --bg: #eef0f3; --panel: #fff; --panel2: #f1f3f6; --line: #d6dae1; --fg: #1d2129;
     --muted: #5d6573; }
 }
+
+/* Street View crops of the selected object, and the full shot on click */
+.views-head { margin-top: 8px; font-weight: 600; font-size: 12px; }
+.views { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.crop { position: relative; border: 1px solid var(--line); border-radius: 4px; background-repeat: no-repeat; cursor: zoom-in; }
+.crop.own { border-color: #ffb74d; }
+.crop::after { content: ''; position: absolute; left: 50%; top: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px;
+  border: 2px solid #ff4081; border-radius: 50%; box-shadow: 0 0 0 1px #0008; }
+.crop span { position: absolute; left: 0; right: 0; bottom: 0; font-size: 10px; padding: 1px 4px; background: #000a; color: #fff; }
+#lightbox { position: fixed; inset: 0; background: #000c; display: none; align-items: center; justify-content: center; z-index: 10000; }
+.lb-box { max-width: 94vw; max-height: 94vh; background: var(--panel, #1c1f26); border-radius: 6px; padding: 8px; }
+.lb-bar { display: flex; gap: 12px; align-items: center; margin-bottom: 6px; }
+.lb-bar .lb-close { margin-left: auto; }
+.lb-img { position: relative; }
+.lb-img img { display: block; max-width: 90vw; max-height: 84vh; }
+.lb-mark { position: absolute; width: 34px; height: 34px; margin: -17px 0 0 -17px; border: 3px solid #ff4081; border-radius: 50%; pointer-events: none; }

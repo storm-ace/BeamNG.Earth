@@ -168,4 +168,12 @@ def create_app(cfg=None):
         return FileResponse(os.path.join(STATIC, "index.html"), headers={"Cache-Control": "no-store"})
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+    # the page's own scripts change while it is in use (a reload must pick them up, not the browser's copy)
+    @app.middleware("http")
+    async def no_cache_static(request, call_next):
+        resp = await call_next(request)
+        if request.url.path.startswith("/static/") or request.url.path == "/":
+            resp.headers["Cache-Control"] = "no-cache"
+        return resp
     return app
