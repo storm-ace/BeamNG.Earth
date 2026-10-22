@@ -35,6 +35,11 @@ FOOTPRINT_PAD_M = 2.0
 # stood in the trench as teeth along both walls, closing the passages under the decks (in game 2026-10-22). Kept under
 # the lowest floor within a lattice's diagonal, that slope lies under the kunstwerk's street (its columns are solid)
 CAP_REACH_M = 3
+# m round a kunstwerk's rails the ground under it is bare (no grass of the game's ground cover): the terrain lies just
+# under the tram's grass bed, and its grass stood through the rails (in game 2026-10-22: "de tram rails gaat door het
+# gras heen")
+RAIL_BARE_M = 2
+RAIL_MATS = ("bne_rail_steel", "bne_steel_black")
 
 _lock = threading.Lock()
 _all = None
@@ -98,8 +103,22 @@ class Kunstwerk:
             self.fx0, self.fy0 = float(fl["x0"]), float(fl["y0"])
             self.foot = _grow(np.isfinite(self.floor), int(round(FOOTPRINT_PAD_M)))     # (1 m cells)
             self.low = _lowest(self.floor, CAP_REACH_M)
+            rail = np.zeros(self.floor.shape, bool)
+            mi = [i for i, m in enumerate(self.mats) if m in RAIL_MATS]
+            if mi:
+                t = self.P[self.T[np.isin(self.tm, mi)]][:, :, :2]         # (k, 3, 2): along each edge every 0.5 m
+                v = np.concatenate([a + (b - a) * s for a, b in ((t[:, 0], t[:, 1]), (t[:, 1], t[:, 2]),
+                                                                 (t[:, 2], t[:, 0]))
+                                    for s in np.linspace(0, 1, int(np.ceil(np.hypot(*(b - a).T).max() / 0.5)) + 1)
+                                    [:, None, None]])
+                v = v.reshape(-1, 2)
+                i = np.floor(v[:, 0] - self.fx0).astype(np.int64)
+                j = np.floor(v[:, 1] - self.fy0).astype(np.int64)
+                k = (i >= 0) & (i < rail.shape[1]) & (j >= 0) & (j < rail.shape[0])
+                rail[j[k], i[k]] = True
+            self.bare = _grow(rail, RAIL_BARE_M)
         else:
-            self.floor = self.foot = self.low = None
+            self.floor = self.foot = self.low = self.bare = None
         self.lo = self.P[:, :2].min(0) - BOX_PAD_M
         self.hi = self.P[:, :2].max(0) + BOX_PAD_M
         self._enu = {}
@@ -216,6 +235,10 @@ class Kunstwerk:
         """Which points lie on its floor or within FOOTPRINT_PAD_M of it."""
         return self._cells(lat, lon, self.foot, False)
 
+    def bare_at(self, lat, lon):
+        """Which points lie within RAIL_BARE_M of its rails."""
+        return self._cells(lat, lon, self.bare, False)
+
     def deck_top(self, lat, lon):
         x, y = self._rd(lat, lon)
         x, y = np.ravel(x), np.ravel(y)
@@ -280,6 +303,20 @@ def covered(lat, lon):
             idx = np.flatnonzero(b)
             out[idx] |= np.isfinite(k.floor_at(lat[idx], lon[idx]))
     return out
+
+
+def bare(lat, lon):
+    """Which points the ground under a kunstwerk is bare at (round its rails: no ground cover through them)."""
+    lat, lon = np.asarray(lat, np.float64), np.asarray(lon, np.float64)
+    shape = lat.shape
+    lat, lon = lat.ravel(), lon.ravel()
+    out = np.zeros(lat.shape, bool)
+    for k in all_kunstwerken():
+        b = k.in_box(lat, lon)
+        if b.any():
+            idx = np.flatnonzero(b)
+            out[idx] |= k.bare_at(lat[idx], lon[idx])
+    return out.reshape(shape)
 
 
 def in_footprint(lat, lon, kws=None):

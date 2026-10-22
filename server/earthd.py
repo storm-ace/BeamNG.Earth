@@ -1336,6 +1336,9 @@ class Server:
                                              self.surface.urban, self.road_widths, blockworker._open_tunnels(g, keep))
             idx = (surfacemod.paint_lots(idx, keep["lat"], keep["lon"], self.surface.lots(keep["lat"], keep["lon"]))
                 if hasattr(self.surface, "lots") else idx)
+            if self.bgt is not None:            # (no ground cover through a kunstwerk's rails, as blockworker.build)
+                import kunstwerken as kwmod
+                idx[kwmod.bare(keep["lat"], keep["lon"]).reshape(idx.shape)] = surfacemod.DIRT
             stages["roadPaint"] = time.perf_counter() - t1
             complete = complete and roads_complete
             info["layers"] = surfacemod.write_masks(idx[::-1], self.out_dir, self.hm_name((anchor.id, cx, cy))[:-4])

@@ -131,6 +131,27 @@ class FootprintTest(unittest.TestCase):
         self.assertAlmostEqual(float(np.sin(yaw)), -1.0, places=1)
 
 
+class BareTest(unittest.TestCase):
+    """The ground under a kunstwerk's rails is bare: the game's ground cover grew through them (in game 2026-10-22)."""
+
+    def test_bare_round_its_rails_only(self):
+        k = kunstwerken.Kunstwerk({
+            "name": "t", "origin_rd": [91600, 435900],
+            "positions": [[-10, -10, 3], [10, -10, 3], [10, 10, 3], [-10, 10, 3],
+                          [-10, 0, 3.03], [10, 0, 3.03], [10, 0.07, 3.03], [-10, 0.07, 3.03]],
+            "tris": [[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]],
+            "materials": ["bne_grass", "bne_rail_steel"], "tri_material": [0, 0, 1, 1],
+            "floor": {"x0": -10, "y0": -10, "nx": 20, "ny": 20, "z": [3.0] * 400}})
+        saved, kunstwerken._all = kunstwerken._all, [k]
+        try:
+            la, lo = ahn.rd_to_wgs(91600.0 + np.array([-9.5, 0.3, 0.3, 0.3]), 435900.0 + np.array([0.5, 1.5, 6.0, -8.0]))
+            got = kunstwerken.bare(np.asarray(la), np.asarray(lo))
+            np.testing.assert_array_equal(got, [True, True, False, False],
+                                          err_msg="at the rail's end; its middle 1.5 m off it; 6 m and 8 m off it")
+        finally:
+            kunstwerken._all = saved
+
+
 class ShippedPaintTest(unittest.TestCase):
     """The shipped kunstwerken's road paint faces up: a face wound the other way is culled from above and the paint is
     not seen (the trench's lane lines were all wound down, its floor bare asphalt in game, the user 2026-10-22)."""

@@ -273,6 +273,9 @@ def build(aid, lat, lon, hm_zoom, q, cx, cy, size, out_dir, name, ter_name=None)
                                          _s.surface.urban, _s.widths, _open_tunnels(g, keep))
         idx = (surfacemod.paint_lots(idx, keep["lat"], keep["lon"], _s.surface.lots(keep["lat"], keep["lon"]))
             if hasattr(_s.surface, "lots") else idx)
+        if getattr(_s, "bgt", None) is not None:    # (no ground cover through a kunstwerk's rails)
+            import kunstwerken as kwmod
+            idx[kwmod.bare(keep["lat"], keep["lon"]).reshape(idx.shape)] = surfacemod.DIRT
         stages["roadPaint"] = time.perf_counter() - t1
         info["layers"] = surfacemod.write_masks(idx[::-1], out_dir, name[:-4])
         info["surfaceComplete"] = complete and roads_complete
