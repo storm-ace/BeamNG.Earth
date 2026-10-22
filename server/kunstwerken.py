@@ -15,6 +15,7 @@ tris, materials (the game's), tri_material, decks [{ring (k, 2) RD metres from t
 import glob
 import json
 import logging
+import math
 import os
 import threading
 
@@ -25,9 +26,78 @@ log = logging.getLogger("earthd.kunstwerken")
 DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "kunstwerken")
 UV_M = 4.0                  # m per texture repeat on a kunstwerk's faces (concrete)
 BOX_PAD_M = 2.0             # m round a kunstwerk's footprint its box reaches (the BGT's walls kept out of it)
+# m round its floor its footprint reaches: what stands there of ours (the BGT's walls, props, lamps, utility wires, the
+# AI's switchable signal heads) is left out, the kunstwerk has its own. The floor, not the box: the area is a rotated
+# rectangle, its RD box took the generator's furniture out of the corners round it too (2026-10-22)
+FOOTPRINT_PAD_M = 2.0
+# m round a point the terrain under a kunstwerk takes the lowest floor of (cap): the terrain is a lattice of points 2 m
+# apart, and between a point on a trench's floor and one on the street over it its triangle ran across the wall and
+# stood in the trench as teeth along both walls, closing the passages under the decks (in game 2026-10-22). Kept under
+# the lowest floor within a lattice's diagonal, that slope lies under the kunstwerk's street (its columns are solid)
+CAP_REACH_M = 3
+# m round a kunstwerk's rails the ground under it is bare (no grass of the game's ground cover): the terrain lies just
+# under the tram's grass bed, and its grass stood through the rails (in game 2026-10-22: "de tram rails gaat door het
+# gras heen")
+RAIL_BARE_M = 2
+RAIL_MATS = ("bne_rail_steel", "bne_steel_black")
 
 _lock = threading.Lock()
 _all = None
+
+
+def _grow(mask, r):
+    """mask with every cell within r cells of a set one set too (a disc)."""
+    out = mask.copy()
+    ny, nx = mask.shape
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            if (dx or dy) and dx * dx + dy * dy <= r * r:
+                out[max(dy, 0):ny + min(dy, 0), max(dx, 0):nx + min(dx, 0)] |= \
+                    mask[max(-dy, 0):ny + min(-dy, 0), max(-dx, 0):nx + min(-dx, 0)]
+    return out
+
+
+def _lowest(z, r):
+    """z (NaN: none) with every finite cell the lowest finite value within r cells of it (a disc); NaN stays NaN."""
+    out = z.copy()
+    ny, nx = z.shape
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            if (dx or dy) and dx * dx + dy * dy <= r * r:
+                dst = out[max(dy, 0):ny + min(dy, 0), max(dx, 0):nx + min(dx, 0)]
+                np.fmin(dst, z[max(-dy, 0):ny + min(-dy, 0), max(-dx, 0):nx + min(-dx, 0)], out=dst)
+    out[~np.isfinite(z)] = np.nan
+    return out
+
+
+def two_sided_apart(P, T, UV=None):
+    """(P, T, UV) with each triangle that is another's reverse (a thin part seen from both sides: tools/kunstwerk_props
+    Mesh.add's two_sided, a sign's face, a lens) on vertices of its own. On shared ones the engine's vertex normal
+    (cdae.face_normal_sum: the adjacent faces' normals summed) is the rounding left of +n - n, a direction at random
+    per vertex: the plates' faces shaded in radial streaks (the E1 plate, in game 2026-10-22). Pure."""
+    P, T = np.asarray(P), np.asarray(T, np.int64)
+    if not len(T):
+        return P, T, UV
+    n = max(int(T.max()) + 1, len(P))
+    r = np.argmin(T, axis=1)                    # each triangle turned to start at its lowest vertex: its oriented key
+    rows = np.arange(len(T))
+    a, b, c = T[rows, r], T[rows, (r + 1) % 3], T[rows, (r + 2) % 3]
+    fwd, rev = (a * n + b) * n + c, (a * n + c) * n + b
+    keys, first = np.unique(fwd, return_index=True)
+    i = np.searchsorted(keys, rev)
+    i = np.minimum(i, len(keys) - 1)
+    back = (keys[i] == rev) & (first[i] < rows)     # the later of each pair
+    if not back.any():
+        return P, T, UV
+    used = np.unique(T[back])
+    remap = np.arange(n)
+    remap[used] = n + np.arange(len(used))
+    T = T.copy()
+    T[back] = remap[T[back]]
+    P = np.concatenate([P, P[used]])
+    if UV is not None:
+        UV = np.concatenate([np.asarray(UV), np.asarray(UV)[used]])
+    return P, T, UV
 
 
 def _inside(ring, px, py):
@@ -51,13 +121,42 @@ class Kunstwerk:
         self.tm = np.asarray(data["tri_material"], np.int64)
         self.decks = [(np.asarray(d["ring"], np.float64), np.asarray(d["plane"], np.float64)) for d in data.get("decks", ())]
         self.UV = np.asarray(data["uvs"], np.float64) if "uvs" in data else None
+        self.P, self.T, self.UV = two_sided_apart(self.P, self.T, self.UV)     # (its signs' faces: their own normals)
+        # its traffic lights' heads (tools/kunstwerk_export.py): the middle of each, RD metres from the origin and NAP,
+        # and the way it looks; the game switches them (hide_heads)
+        self.signals = [(np.asarray(s["at"], np.float64), np.asarray(s["facing"], np.float64))
+                        for s in data.get("signals", ())]
+        # "bike": a cyclists' head under the head before it on its pole; "cycle": a cycle path's light alone
+        # "cross_ped" / "cross_bike": a signalled crossing's pedestrians' / cyclists' head, "across": the axis of the
+        # road it crosses (it shows the inverse of that road's traffic: hide_heads)
+        self.signal_kinds = ["cross_" + s["crossing"] if s.get("crossing") else "bike" if s.get("bike")
+                             else "cycle" if s.get("cycle") else "" for s in data.get("signals", ())]
+        self.signal_across = [np.asarray(s["across"], np.float64) if s.get("across") else None
+                              for s in data.get("signals", ())]
+        self.wires = [np.asarray(w, np.float64) for w in data.get("wires", ()) if len(w) >= 2]    # (its overhead line)
         fl = data.get("floor")
         if fl:
             self.floor = np.asarray(fl["z"], np.float64).reshape(fl["ny"], fl["nx"])
             self.floor[self.floor < -900] = np.nan
             self.fx0, self.fy0 = float(fl["x0"]), float(fl["y0"])
+            self.foot = _grow(np.isfinite(self.floor), int(round(FOOTPRINT_PAD_M)))     # (1 m cells)
+            self.low = _lowest(self.floor, CAP_REACH_M)
+            rail = np.zeros(self.floor.shape, bool)
+            mi = [i for i, m in enumerate(self.mats) if m in RAIL_MATS]
+            if mi:
+                t = self.P[self.T[np.isin(self.tm, mi)]][:, :, :2]         # (k, 3, 2): along each edge every 0.5 m
+                v = np.concatenate([a + (b - a) * s for a, b in ((t[:, 0], t[:, 1]), (t[:, 1], t[:, 2]),
+                                                                 (t[:, 2], t[:, 0]))
+                                    for s in np.linspace(0, 1, int(np.ceil(np.hypot(*(b - a).T).max() / 0.5)) + 1)
+                                    [:, None, None]])
+                v = v.reshape(-1, 2)
+                i = np.floor(v[:, 0] - self.fx0).astype(np.int64)
+                j = np.floor(v[:, 1] - self.fy0).astype(np.int64)
+                k = (i >= 0) & (i < rail.shape[1]) & (j >= 0) & (j < rail.shape[0])
+                rail[j[k], i[k]] = True
+            self.bare = _grow(rail, RAIL_BARE_M)
         else:
-            self.floor = None
+            self.floor = self.foot = self.low = self.bare = None
         self.lo = self.P[:, :2].min(0) - BOX_PAD_M
         self.hi = self.P[:, :2].max(0) + BOX_PAD_M
         self._enu = {}
@@ -77,6 +176,49 @@ class Kunstwerk:
             e, n, u = frame.geodetic_to_enu(la, lo, self.P[:, 2])
             got = self._enu[key] = np.c_[np.asarray(e), np.asarray(n), np.asarray(u)]
         return got
+
+    def heads(self, frame):
+        """Its signal heads in the frame: [(x, y, z, facing x, facing y)]."""
+        if not self.signals:
+            return []
+        import ahn
+        at = np.array([s[0] for s in self.signals])
+        f = np.array([s[1] for s in self.signals])
+        f = f / np.maximum(np.hypot(f[:, 0], f[:, 1]), 1e-9)[:, None]
+        la, lo = ahn.rd_to_wgs(at[:, 0] + self.origin[0], at[:, 1] + self.origin[1])
+        e, n, u = frame.geodetic_to_enu(la, lo, at[:, 2])
+        la2, lo2 = ahn.rd_to_wgs(at[:, 0] + f[:, 0] + self.origin[0], at[:, 1] + f[:, 1] + self.origin[1])
+        e2, n2, _ = frame.geodetic_to_enu(la2, lo2, at[:, 2])
+        de, dn = np.asarray(e2) - np.asarray(e), np.asarray(n2) - np.asarray(n)
+        h = np.maximum(np.hypot(de, dn), 1e-9)
+        return [(float(a), float(b), float(c), float(x), float(y))
+                for a, b, c, x, y in zip(np.atleast_1d(e), np.atleast_1d(n), np.atleast_1d(u), de / h, dn / h)]
+
+    def tile_wires(self, frame, box):
+        """Its overhead wires' pieces whose segments' middles lie in the box (x0, y0, x1, y1), as the frame's
+        polylines (k, 3) (the road tiles' utility wires: furniture.wire_mesh, render-only); each segment in one tile."""
+        if not self.wires:
+            return []
+        import ahn
+        x0, y0, x1, y1 = box
+        out = []
+        for w in self.wires:
+            la, lo = ahn.rd_to_wgs(w[:, 0] + self.origin[0], w[:, 1] + self.origin[1])
+            e, n, u = frame.geodetic_to_enu(la, lo, w[:, 2])
+            p = np.c_[np.atleast_1d(e), np.atleast_1d(n), np.atleast_1d(u)]
+            mid = (p[:-1] + p[1:]) / 2
+            ins = (mid[:, 0] >= x0) & (mid[:, 0] < x1) & (mid[:, 1] >= y0) & (mid[:, 1] < y1)
+            i = 0
+            while i < len(ins):
+                if not ins[i]:
+                    i += 1
+                    continue
+                j = i
+                while j + 1 < len(ins) and ins[j + 1]:
+                    j += 1
+                out.append(p[i:j + 2])
+                i = j + 1
+        return out
 
     def over(self, frame, box):
         """Does it reach into the box (x0, y0, x1, y1) in the frame?"""
@@ -106,19 +248,34 @@ class Kunstwerk:
         x, y = self._rd(lat, lon)
         return (x >= self.lo[0]) & (x <= self.hi[0]) & (y >= self.lo[1]) & (y <= self.hi[1])
 
-    def floor_at(self, lat, lon):
-        """Its floor's height (the lowest road surface it draws) per point, NaN where it draws none."""
+    def _cells(self, lat, lon, grid, fill):
         x, y = self._rd(lat, lon)
         x, y = np.ravel(x), np.ravel(y)
-        out = np.full(x.shape, np.nan)
-        if self.floor is None:
+        out = np.full(x.shape, fill, grid.dtype if grid is not None else type(fill))
+        if grid is None:
             return out
-        ny, nx = self.floor.shape
+        ny, nx = grid.shape
         i = np.floor(x - self.fx0).astype(np.int64)
         j = np.floor(y - self.fy0).astype(np.int64)
         k = (i >= 0) & (i < nx) & (j >= 0) & (j < ny)
-        out[k] = self.floor[j[k], i[k]]
+        out[k] = grid[j[k], i[k]]
         return out
+
+    def floor_at(self, lat, lon):
+        """Its floor's height (the lowest road surface it draws) per point, NaN where it draws none."""
+        return self._cells(lat, lon, self.floor, np.nan)
+
+    def low_at(self, lat, lon):
+        """The lowest floor within CAP_REACH_M of each point (where it draws a floor), NaN elsewhere."""
+        return self._cells(lat, lon, self.low, np.nan)
+
+    def in_footprint(self, lat, lon):
+        """Which points lie on its floor or within FOOTPRINT_PAD_M of it."""
+        return self._cells(lat, lon, self.foot, False)
+
+    def bare_at(self, lat, lon):
+        """Which points lie within RAIL_BARE_M of its rails."""
+        return self._cells(lat, lon, self.bare, False)
 
     def deck_top(self, lat, lon):
         x, y = self._rd(lat, lon)
@@ -186,6 +343,310 @@ def covered(lat, lon):
     return out
 
 
+def bare(lat, lon):
+    """Which points the ground under a kunstwerk is bare at (round its rails: no ground cover through them)."""
+    lat, lon = np.asarray(lat, np.float64), np.asarray(lon, np.float64)
+    shape = lat.shape
+    lat, lon = lat.ravel(), lon.ravel()
+    out = np.zeros(lat.shape, bool)
+    for k in all_kunstwerken():
+        b = k.in_box(lat, lon)
+        if b.any():
+            idx = np.flatnonzero(b)
+            out[idx] |= k.bare_at(lat[idx], lon[idx])
+    return out.reshape(shape)
+
+
+def in_footprint(lat, lon, kws=None):
+    """Which points lie in a kunstwerk's footprint (its floor, FOOTPRINT_PAD_M round it); kws: the ones to ask (all)."""
+    lat, lon = np.ravel(np.asarray(lat, np.float64)), np.ravel(np.asarray(lon, np.float64))
+    out = np.zeros(lat.shape, bool)
+    for k in all_kunstwerken() if kws is None else kws:
+        b = k.in_box(lat, lon)
+        if b.any():
+            idx = np.flatnonzero(b)
+            out[idx] |= k.in_footprint(lat[idx], lon[idx])
+    return out
+
+
+def keep_out(frame, xy, kws=None):
+    """in_footprint of the frame's points xy (k, 2)."""
+    xy = np.asarray(xy, np.float64).reshape(-1, 2)
+    if not len(xy):
+        return np.zeros(0, bool)
+    la, lo, _ = frame.enu_to_geodetic(xy[:, 0], xy[:, 1], np.zeros(len(xy)))
+    return in_footprint(la, lo, kws)
+
+
+HEAD_SHAPE = "/levels/beamng_earth/art/shapes/beamngEarth/bne_nl_signal.cdae"     # tools/nl_signal_head.py
+HEAD_SHAPE_BIKE = "/levels/beamng_earth/art/shapes/beamngEarth/bne_nl_signal_bike.cdae"   # (the cyclists' under it)
+HEAD_FACING = 0.6           # cos: a head looks at its traffic within ~53 degrees
+# m: where along an approach (from its stop point, along its traffic) its kunstwerk heads may stand: a little before it
+# (the graph's stop point is its junction's widest arm plus 2 m, the painted line can lie a few metres farther out) to
+# the far side of a wide junction. Before, any head within 30 m of the stop point would do, behind it too: the
+# Droogleever's Westzeedijk approach took a head 21 m back up its own road (2026-10-22)
+HEAD_BEHIND_M, HEAD_AHEAD_M = 8.0, 30.0
+HEAD_ACROSS_M = 12.0        # m a head stands at most beside its approach's line (a median, a kerb, an arm's mast)
+EDGE_ACROSS_M = 10.0        # m a head stands at most beside a graph edge it is made an approach on
+HEAD_UP_M = (0.5, 8.0)      # m a head stands over the road it shows (not the trench's lanes under a deck's street)
+MAPPED_ON_ROAD_M = 3.5      # m: a mapped signal point this near an edge's line is on that road (not a cycle path's)
+PAST_LINE_M = 1.0           # m a head stands past its stop line (a Dutch primary: just after it)
+JOIN_M = 60.0               # m from a signalled junction's node an approach made for a head joins its phases
+PARALLEL = 0.5              # cos: an approach this near a head's axis shows its light (the cyclists' beside it)
+ATTACH_M = 50.0             # m from a head that approach's stop point may lie (the oval's cycle crossings: 43 m)
+LAST_FACING = 0.3           # cos: else the nearest approach whose traffic comes this much its way
+
+
+def _yaw(fx, fy):
+    # (navgraph.lua turns the head by -yaw: the yaw that takes its local +x to (fy, -fx) faces its +y along f)
+    return round(math.degrees(math.atan2(-fx, fy)) % 360.0, 1)
+
+
+def _head_rec(h, shape=HEAD_SHAPE):
+    x, y, z, fx, fy = h
+    return [round(x, 2), round(y, 2), round(z, 2), _yaw(fx, fy), shape]
+
+
+def _give(a, h, bikes=()):
+    """Head h shows approach a, and the cyclists' heads under it on its pole (bikes): its first head in a[7:12], the
+    others in a[12] (navgraph.lua: one signal instance, all its heads switched together)."""
+    recs = [_head_rec(h)] + [_head_rec(b, HEAD_SHAPE_BIKE) for b in bikes]
+    if a[7] is None:
+        a[7:] = recs.pop(0)
+    if recs:
+        if len(a) < 13:
+            a.append([])
+        a[12] += recs
+
+
+def _edge_for(h, graph, sig_pts):
+    """The graph's edge whose traffic head h looks at (its direction within HEAD_FACING, the head beside it within
+    EDGE_ACROSS_M and over it by HEAD_UP_M) where a mapped signal stands on that road (MAPPED_ON_ROAD_M off its line,
+    HEAD_AHEAD_M along it from the head: not a cycle path's light beside it): (in node, out node, travel unit, stop
+    point, its height) or None."""
+    nodes = graph.get("nodes") or {}
+    if not len(sig_pts):
+        return None
+    x, y, z, fx, fy = h
+    best = None
+    for e in graph.get("edges") or ():
+        if e[0] not in nodes or e[1] not in nodes:
+            continue
+        for a_, b_ in ((e[0], e[1]),) if e[2] else ((e[0], e[1]), (e[1], e[0])):
+            A, B = np.asarray(nodes[a_][:3], np.float64), np.asarray(nodes[b_][:3], np.float64)
+            d = B[:2] - A[:2]
+            L = float(np.hypot(*d))
+            if L < 1.0:
+                continue
+            t = d / L
+            if -(fx * t[0] + fy * t[1]) < HEAD_FACING:
+                continue
+            s = float((np.array([x, y]) - A[:2]) @ t)
+            if not -PAST_LINE_M <= s <= L + PAST_LINE_M:
+                continue
+            across = abs(float(t[0] * (y - A[1]) - t[1] * (x - A[0])))
+            if across > EDGE_ACROSS_M:
+                continue
+            ez = float(A[2] + (B[2] - A[2]) * min(max(s / L, 0.0), 1.0))
+            if not HEAD_UP_M[0] <= z - ez <= HEAD_UP_M[1]:
+                continue
+            q = sig_pts - A[:2]
+            on = (np.abs(t[0] * q[:, 1] - t[1] * q[:, 0]) <= MAPPED_ON_ROAD_M) & (np.abs(q @ t - s) <= HEAD_AHEAD_M)
+            if not on.any():
+                continue
+            if best is None or across < best[0]:
+                right = np.array([t[1], -t[0]])
+                half = min(max(float(e[7]) / 2, 0.8), 2.5) if len(e) > 7 else 1.5
+                stop = A[:2] + t * max(s - PAST_LINE_M, 0.0) + right * half
+                best = (across, (a_, b_, t, stop, ez))
+    return None if best is None else best[1]
+
+
+def hide_heads(frame, signals, graph=None, mapped=None):
+    """navgraph's signals in a kunstwerk's footprint (their stop points) get the kunstwerk's own heads instead of the
+    stock boom (its poles carry no head of their own: the game puts HEAD_SHAPE there and switches it, navgraph.lua);
+    an approach none of its heads shows gets none (the stock boom stood in its lanes, 2026-10-22). The phases hold the
+    AI either way. Its lights stood dead before: their heads were part of its mesh.
+
+    Head first, each to the approach it belongs to: the one whose traffic it looks at (HEAD_FACING), its stop point
+    HEAD_BEHIND_M before to HEAD_AHEAD_M past the head along that traffic and HEAD_ACROSS_M beside it, the nearest
+    such; the primary and its repeater both (one instance switches them all: a[12]). With the graph (nodes, edges) and
+    the mapped controls (furniture.Mapped): a head on a road the graph has no signalled approach on (a signal halfway
+    round the Droogleever's oval: Overture's graph has no junction there) gets an approach made on the edge it looks
+    at where a mapped signal stands on that road, in the phases of the signalled junction within JOIN_M (else its own);
+    a head for no car road (a cycle path's) shows the light of the approach nearest it along its axis (PARALLEL,
+    ATTACH_M): its cyclists go with that traffic. The Droogleever's 18 heads: before, approach first, 5 had one (two of
+    them for the wrong approach, 18-21 m back up its road) and the rest of their poles stood headless (2026-10-22)."""
+    kws = all_kunstwerken()
+    if not kws:
+        return signals
+    heads, bikes, cycle, crossing = [], {}, set(), []
+    for k in kws:
+        hs = k.heads(frame)
+        kinds = (list(getattr(k, "signal_kinds", ())) + [""] * len(hs))[:len(hs)]
+        acr = (list(getattr(k, "signal_across", ())) + [None] * len(hs))[:len(hs)]
+        for i, (h, kind) in enumerate(zip(hs, kinds)):
+            if kind.startswith("cross_"):       # (a crossing's head: its road's axis turned as its facing was)
+                f_rd = np.asarray(k.signals[i][1], np.float64)
+                rot = math.atan2(h[4], h[3]) - math.atan2(f_rd[1], f_rd[0])
+                ax = acr[i] if acr[i] is not None else np.array([-f_rd[1], f_rd[0]])
+                c, s_ = math.cos(rot), math.sin(rot)
+                crossing.append((h, kind[6:], (c * ax[0] - s_ * ax[1], s_ * ax[0] + c * ax[1])))
+                continue
+            if kind == "bike" and heads:        # (a cyclists' head under the one before it, on its pole)
+                bikes[id(heads[-1])].append(h)
+                continue
+            heads.append(h)
+            bikes[id(h)] = []
+            if kind == "cycle":
+                cycle.add(id(h))
+    spots = [(i, j) for i, s in enumerate(signals) for j, a in enumerate(s["app"])]
+    hit = keep_out(frame, [signals[i]["app"][j][1:3] for i, j in spots]) if spots else []
+    ours = [signals[i]["app"][j] for (i, j), h in zip(spots, hit) if h]
+    for a in ours:
+        a[7:] = [None] * 4
+    if not heads and not crossing:
+        return signals
+    n_app = n_made = n_side = 0
+    left = []
+    for h in heads:
+        x, y, z, fx, fy = h
+        best = None
+        for a in ours:
+            inc = np.asarray(a[4:6], np.float64)
+            if -(fx * inc[0] + fy * inc[1]) < HEAD_FACING:
+                continue
+            q = np.array([x - a[1], y - a[2]])
+            along, across = float(q @ inc), abs(float(inc[0] * q[1] - inc[1] * q[0]))
+            if -HEAD_BEHIND_M <= along <= HEAD_AHEAD_M and across <= HEAD_ACROSS_M:
+                score = across + 0.5 * abs(along)
+                if best is None or score < best[0]:
+                    best = (score, a)
+        if best is None:
+            left.append(h)
+            continue
+        _give(best[1], h, bikes[id(h)])
+        n_app += 1
+    if graph is not None and left:
+        import furniture
+        nodes = graph.get("nodes") or {}
+        pts = getattr(mapped, "pts", {}).get(furniture.G_SIGNAL) if mapped is not None else None
+        pts = np.zeros((0, 2)) if pts is None else np.asarray(pts, np.float64).reshape(-1, 2)
+        rest = []
+        for h in left:
+            got = None if id(h) in cycle else _edge_for(h, graph, pts)     # (no car stops at a cycle path's light)
+            if got is None:
+                rest.append(h)
+                continue
+            a_, b_, t, stop, ez = got
+            # an approach on that road already (the graph's stop point a little inside the junction, the painted line
+            # farther out where the head stands): that one's head, not a second stop behind it
+            same = [a for a in ours if float(np.asarray(a[4:6], np.float64) @ t) > 0.8
+                    and abs(float(t[0] * (a[2] - stop[1]) - t[1] * (a[1] - stop[0]))) < 3.0
+                    and abs(float(t @ np.array([a[1] - stop[0], a[2] - stop[1]]))) < HEAD_AHEAD_M]
+            if same:
+                _give(min(same, key=lambda a: math.hypot(a[1] - stop[0], a[2] - stop[1])), h, bikes[id(h)])
+                n_app += 1
+                continue
+
+            def far(s):
+                return math.hypot(nodes[s["j"]][0] - stop[0], nodes[s["j"]][1] - stop[1])
+            rec = min((s for s in signals if s.get("kind") == "signal" and s["j"] in nodes), key=far, default=None)
+            if rec is None or far(rec) > JOIN_M:
+                rec = {"j": b_, "kind": "signal", "app": []}
+                signals.append(rec)
+            axis = next((np.asarray(a[4:6], np.float64) for a in rec["app"] if a[6] == 0), t)
+            a = [a_, round(float(stop[0]), 2), round(float(stop[1]), 2), round(ez, 2), round(float(t[0]), 4),
+                 round(float(t[1]), 4), 0 if abs(float(t @ axis)) > 0.7 else 1, None, None, None, None]
+            _give(a, h, bikes[id(h)])
+            rec["app"].append(a)
+            ours.append(a)
+            n_made += 1
+        left = rest
+    rest = []
+    # (an approach's junction: a cycle crossing's head stands by the junction, its approach of the same axis can stop
+    # 50 m off on the far side, the 's-Gravendijkwal's north crossing, 2026-10-22)
+    nodes = (graph or {}).get("nodes") or {}
+    jxy = {id(a): nodes[s["j"]][:2] for s in signals if s["j"] in nodes for a in s["app"]}
+    for h in left:
+        x, y, z, fx, fy = h
+        best = None
+        for a in ours:
+            inc = np.asarray(a[4:6], np.float64)
+            c = -(fx * inc[0] + fy * inc[1])            # (1: it looks at that traffic, -1: at the other way's)
+            d = math.hypot(x - a[1], y - a[2])
+            if id(a) in jxy:
+                d = min(d, math.hypot(x - jxy[id(a)][0], y - jxy[id(a)][1]))
+            # the same way first, then the other way's (one axis, one phase), at last the nearest whose traffic comes
+            # its way at all (a cycle crossing at an angle: the oval's east side, 2026-10-22)
+            tier = 0 if c >= PARALLEL else 1 if c <= -PARALLEL else 2 if c >= LAST_FACING else None
+            if tier is not None and d <= ATTACH_M:
+                key = (tier, d)
+                if best is None or key < best[0]:
+                    best = (key, a)
+        if best is None:
+            rest.append(h)
+            continue
+        _give(best[1], h, bikes[id(h)])
+        n_side += 1
+    n_cross, n_lost = _crossing_heads(crossing, ours, jxy)
+    log.info("kunstwerk heads: %d of %d on the graph's signalled approaches, %d on approaches made for them, %d "
+             "beside a parallel one (cyclists), %d on none; crossings: %d of %d heads the inverse of the road they "
+             "cross, %d on none", n_app, len(heads), n_made, n_side, len(rest), n_cross, len(crossing), n_lost)
+    return signals
+
+
+HEAD_SHAPE_PED = "/levels/beamng_earth/art/shapes/beamngEarth/bne_nl_signal_ped.cdae"   # (a crossing's pedestrians')
+ALONG_ROAD = 0.7            # cos: an approach this near a crossing's road axis drives that road
+CROSS_REACH_M = (-12.0, 45.0)   # m: a crossing this far past an approach's stop point (behind: -) is on its way
+CROSS_ACROSS_M = 15.0       # m a crossing's head stands at most beside the line of the approach whose road it crosses
+
+
+def _crossing_heads(crossing, ours, jxy=None):
+    """A signalled crossing's heads (kunstwerk_placement.crossing_lights: its pedestrians' and cyclists') show the
+    inverse of the traffic on the road they cross: green while that road's approach stands at red, red while it has
+    green or amber (navgraph.lua: an "inv" head of its instance; the junction's two phases split by axis make that the
+    phase of the roads beside the crossing). The approach: of those driving along the road crossed (ALONG_ROAD) the
+    one whose stop point lies before the crossing (CROSS_REACH_M along its traffic, CROSS_ACROSS_M beside its line), the
+    nearest; else (a crossing of a junction's way out: no approach drives over it first) the nearest driving along
+    that road either way, or its junction, within ATTACH_M (that axis's phase). The simple rule (the user's, 2026-10-22):
+    no turning traffic's own conflicts, no early green for the pedestrians. Returns (heads given, heads left)."""
+    jxy = jxy or {}
+    n, lost = 0, 0
+    for h, kind, ax in crossing:
+        x, y, z, fx, fy = h
+        ax = np.asarray(ax, np.float64)
+        best = None
+        for a in ours:
+            inc = np.asarray(a[4:6], np.float64)
+            if abs(float(inc @ ax)) < ALONG_ROAD:
+                continue
+            q = np.array([x - a[1], y - a[2]])
+            along, lat = float(q @ inc), abs(float(inc[0] * q[1] - inc[1] * q[0]))
+            if CROSS_REACH_M[0] <= along <= CROSS_REACH_M[1] and lat <= CROSS_ACROSS_M:
+                key = (0, lat + 0.3 * abs(along))
+            else:
+                d = math.hypot(*q)
+                if id(a) in jxy:
+                    d = min(d, math.hypot(x - jxy[id(a)][0], y - jxy[id(a)][1]))
+                if d > ATTACH_M:
+                    continue
+                key = (1, d)
+            if best is None or key < best[0]:
+                best = (key, a)
+        if best is None:
+            lost += 1
+            continue
+        a = best[1]
+        while len(a) < 12:
+            a.append(None)
+        if len(a) < 13:
+            a.append([])
+        a[12].append(_head_rec(h, HEAD_SHAPE_PED if kind == "ped" else HEAD_SHAPE_BIKE) + ["inv"])
+        n += 1
+    return n, lost
+
+
 CAP_M = 0.15                # m the terrain is kept under a kunstwerk's floor
 
 
@@ -204,7 +665,7 @@ def cap(ground):
             b = k.in_box(la, lo)
             if b.any():
                 idx = np.flatnonzero(b)
-                f = k.floor_at(la[idx], lo[idx])
+                f = k.low_at(la[idx], lo[idx])     # (the lowest floor near: CAP_REACH_M)
                 m = np.isfinite(f)
                 dk = np.isfinite(k.deck_top(la[idx], lo[idx]))
                 at = m & ~dk                    # on the ground: just under it (the grading's raise or cut undone)

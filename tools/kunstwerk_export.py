@@ -15,7 +15,8 @@ import numpy as np
 FLOOR_PARTS = ("road", "street_", "decks")      # parts whose top is a floor a car or a cyclist is on
 UV_M = {"road_asphalt_2lane": 8.0, "bne_sidewalk_brick": 1.2, "sidewalk_concrete": 1.5, "italy_cobblestone": 1.0,
         "bne_tunnel_soil": 2.0, "bne_grass": 2.0, "curbs": 2.0, "bne_bridge_concrete": 1.0, "bne_truss_steel": 1.0,
-        "bne_concrete_dark": 4.0, "bne_cycle_red": 8.0, "bne_paint_white": 8.0}
+        "bne_concrete_dark": 4.0, "bne_cycle_red": 8.0, "bne_paint_white": 8.0,
+        "bne_tunnel_tiles": 0.6, "bne_tunnel_light": 1.0}     # (tiles: its texture's 4 x 4 tiles of 15 cm)
 
 
 def raster_floor(P, T, x0, y0, nx, ny):
@@ -85,6 +86,8 @@ def main(argv=None):
            "positions": P.round(3).tolist(), "tris": T.tolist(), "uvs": UV.round(4).tolist(),
            "materials": mats, "tri_material": TM.tolist(),
            "decks": [{"ring": d["ring"], "plane": d["plane"]} for d in decks if d.get("layer") == "tunneldeel"],
+           "signals": data.get("signals", []),         # (its switchable heads: server kunstwerken.hide_heads)
+           "wires": data.get("wires", []),             # (its overhead line, render-only: server kunstwerken.wires)
            "floor": {"x0": float(x0), "y0": float(y0), "nx": nx, "ny": ny,
                      "z": np.where(np.isfinite(floor), np.round(floor, 2), -999).astype(float).ravel().tolist()}}
     os.makedirs(a.out, exist_ok=True)

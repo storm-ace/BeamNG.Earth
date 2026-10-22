@@ -8,7 +8,7 @@ blocked out: every module from a few lofted, lathed and bevelled primitives, tex
   visor, held off the pole by two brackets on clamp rings; optional a cyclists' head and a request button lower down.
 - mast_arm(): the big junctions' pole (light grey, 6.3 m, the band at its foot) with an arm over the lanes and a head
   hanging over each of them, a head on the pole too.
-- sign(): a 60 mm galvanised post with its cap; the plate (a disc, a square or a point-down triangle with rounded
+- sign(): a 60 mm galvanised post with its cap; its plates (a disc, a square, a diamond or a triangle with rounded
   corners) with its folded rim, its face the sign's cell, its back grey with two rails, clamped to the post.
 - gantry(): two tube posts, a box beam, the route signs on it.
 
@@ -27,8 +27,22 @@ POLE_R, POLE_H = 0.057, 3.3
 BAND = (0.3, 1.9)               # m: where the rings start, and one atlas cell's 8 rings over this much (1.6 m)
 HEAD = (0.36, 0.22, 1.02)       # m: the head's width, depth, height (a stadium)
 LENS_R = 0.105                  # m: a 200 mm lens
+BIKE_HEAD_Z, BIKE_SCALE = 1.75, 0.55    # m: the cyclists' head's middle on a light's pole, and its size to the head's
 SIGN_POST_R = 0.030
 PLATES = {"B6": ("triangle", 0.90), "G11": ("disc", 0.60), "D2": ("disc", 0.70), "L2": ("square", 0.60)}
+# the rest of the RVV by its series (BABW, built-up area sizes): B1/B2 a diamond, B3-B5 and J a triangle point up, G, L
+# and E4-E9 a square, the others a disc
+for _code in CELLS:
+    if _code in PLATES or not (_code[:1] in "ABCDEFGJL" and _code[1:2].isdigit()):
+        continue
+    if _code in ("B1", "B2"):
+        PLATES[_code] = ("diamond", 0.70)
+    elif _code[0] == "J" or _code in ("B3", "B4", "B5"):
+        PLATES[_code] = ("triangle_up", 0.90)
+    elif _code[0] in "GL" or (_code[0] == "E" and _code not in ("E1", "E2", "E3")) or _code in ("C3", "C4"):
+        PLATES[_code] = ("square", 0.60)
+    else:
+        PLATES[_code] = ("disc", 0.60)
 SIGN_TOP = 2.6                  # m: a plate's top over the ground
 
 
@@ -218,22 +232,102 @@ def _stadium_face(m, x, y, zc, w, h, cell, seg=12):
           cell_uv(cell, np.r_[0.5, uv[:, 0]], np.r_[0.5, uv[:, 1]]), two_sided=True)
 
 
-def _head(m, y_back, zc, scale=1.0, x=0.0):
+def _head_h(scale=1.0, n=3):
+    """A head's height for n lenses (the three-lens HEAD less a lens pitch for each one fewer: a pedestrians' head has
+    two)."""
+    h3 = HEAD[2] * scale
+    pitch = (h3 - 0.07 * scale - 2 * LENS_R * scale - 0.12 * scale) / 2
+    return h3 - (3 - n) * pitch
+
+
+def head_lenses(scale=1.0, n=3):
+    """The lenses' heights relative to the head's middle (red, amber, green; with n=2 red and green) and their
+    radius."""
+    h = _head_h(scale, n)
+    lr = LENS_R * scale
+    pitch = (HEAD[2] * scale - 0.07 * scale - 2 * lr - 0.12 * scale) / 2
+    top = (h - 0.07 * scale) / 2 - lr - 0.03 * scale
+    return [top - i * pitch for i in range(n)], lr
+
+
+# The figures in a lens (Dutch pedestrians' and cyclists' heads light a symbol, not the whole lens: RVV 1990 art. 69,
+# 70): strokes in a lens of radius 1 (x across, z up), ("seg", x0, z0, x1, z1, half width) or ("disc", x, z, r) or
+# ("ring", x, z, r, half width). The lens is masked black round them (lens_mask)
+FIGURES = {
+    "stand": [("disc", 0.0, 0.58, 0.16), ("seg", 0.0, 0.36, 0.0, -0.08, 0.17), ("seg", -0.2, 0.32, -0.26, -0.06, 0.07),
+              ("seg", 0.2, 0.32, 0.26, -0.06, 0.07), ("seg", -0.08, -0.1, -0.09, -0.72, 0.08),
+              ("seg", 0.08, -0.1, 0.09, -0.72, 0.08)],
+    "walk": [("disc", 0.06, 0.6, 0.15), ("seg", 0.02, 0.38, -0.04, -0.06, 0.14),
+             ("seg", 0.0, 0.32, 0.3, 0.02, 0.065), ("seg", -0.04, 0.32, -0.32, 0.08, 0.065),
+             ("seg", -0.04, -0.08, 0.32, -0.7, 0.08), ("seg", -0.06, -0.08, -0.36, -0.68, 0.08)],
+    "bike": [("ring", -0.42, -0.2, 0.28, 0.06), ("ring", 0.42, -0.2, 0.28, 0.06), ("seg", -0.42, -0.2, -0.1, 0.22, 0.05),
+             ("seg", -0.1, 0.22, 0.32, 0.22, 0.05), ("seg", 0.32, 0.22, 0.42, -0.2, 0.05),
+             ("seg", -0.42, -0.2, 0.05, -0.2, 0.05), ("seg", 0.05, -0.2, -0.1, 0.22, 0.05),
+             ("seg", 0.05, -0.2, 0.32, 0.22, 0.05), ("seg", 0.3, 0.3, 0.42, 0.42, 0.05),
+             ("seg", -0.16, 0.3, -0.02, 0.3, 0.05)],
+}
+
+
+def figure_at(fig, x, z):
+    """Whether the points (x, z) (in a lens of radius 1) lie on the figure's strokes."""
+    x, z = np.asarray(x, np.float64), np.asarray(z, np.float64)
+    on = np.zeros(np.broadcast(x, z).shape, bool)
+    for s in FIGURES[fig]:
+        if s[0] == "disc":
+            on |= np.hypot(x - s[1], z - s[2]) <= s[3]
+        elif s[0] == "ring":
+            on |= np.abs(np.hypot(x - s[1], z - s[2]) - s[3]) <= s[4]
+        else:
+            ax, az, bx, bz, hw = s[1:]
+            dx, dz = bx - ax, bz - az
+            t = np.clip(((x - ax) * dx + (z - az) * dz) / max(dx * dx + dz * dz, 1e-12), 0.0, 1.0)
+            on |= np.hypot(x - ax - t * dx, z - az - t * dz) <= hw
+    return on
+
+
+def lens_mask(m, x, y, z, r, fig, cells=24, reach=1.12):
+    """A black mask over a lens facing +y at (x, y, z) of radius r with the figure fig left open: the grid's cells
+    (cells across reach lens radii, over the bezel's inner edge) off the figure, each row's runs one quad (a cell is
+    left open when its middle is on a stroke)."""
+    c = ((np.arange(cells) + 0.5) / cells * 2 - 1) * reach        # cell middles in the unit lens
+    gx, gz = np.meshgrid(c, c)
+    keep = (np.hypot(gx, gz) <= reach) & ~figure_at(fig, gx, gz)
+    h = r * reach / cells
+    P, T = [], []
+    for j in range(cells):                      # (each row's runs of masked cells one quad)
+        row = np.r_[False, keep[j], False].astype(int)
+        for i0, i1 in zip(np.flatnonzero(np.diff(row) == 1), np.flatnonzero(np.diff(row) == -1)):
+            xa, xb, cz = x + gx[j, i0] * r - h, x + gx[j, i1 - 1] * r + h, z + gz[j, 0] * r
+            k = len(P)
+            P += [(xb, y, cz - h), (xa, y, cz - h), (xa, y, cz + h), (xb, y, cz + h)]
+            T += [[k, k + 2, k + 1], [k, k + 3, k + 2]]
+    if P:
+        m.add(P, T, cell_uv("black", np.full(len(P), 0.5), np.full(len(P), 0.5)), two_sided=True)
+
+
+def _head(m, y_back, zc, scale=1.0, x=0.0, lenses=True, n=3, figures=None):
     """A Rotterdam three-lens head facing +y (its back at y_back, its middle at height zc): a black stadium body, the
-    white contrast rim round its face, three lenses flush in it (no hoods), its number plate under the lowest."""
-    w, d, h = (v * scale for v in HEAD)
+    white contrast rim round its face, three lenses flush in it (no hoods), its number plate under the lowest.
+    lenses=False: their bezels only (tools/nl_signal_head.py puts the game's switchable lenses in them). n=2: a
+    pedestrians' head (red and green); figures: per lens the symbol it lights (FIGURES; tools/nl_signal_head.py masks
+    the game's lenses round them)."""
+    w, d = HEAD[0] * scale, HEAD[1] * scale
+    h = _head_h(scale, n)
     yf = y_back + d
     _stadium(m, x, y_back, yf, zc, w, h, "black")
     _stadium_face(m, x, yf + 0.001, zc, w, h, "white")                 # the rim
     _stadium_face(m, x, yf + 0.002, zc, w - 0.07 * scale, h - 0.07 * scale, "black")
     lr = LENS_R * scale
-    pitch = (h - 0.07 * scale - 2 * lr - 0.12 * scale) / 2
+    pitch = (HEAD[2] * scale - 0.07 * scale - 2 * lr - 0.12 * scale) / 2
     top = zc + (h - 0.07 * scale) / 2 - lr - 0.03 * scale
-    for i, cell in enumerate(("lens_red", "lens_amber", "lens_green")):
+    for i, cell in enumerate(("lens_red", "lens_amber", "lens_green") if n == 3 else ("lens_red", "lens_green")):
         z = top - i * pitch
         m.annulus_y(x, yf + 0.005, z, lr, lr + 0.012 * scale, "black", depth=0.002)
-        m.disc_y(x, yf + 0.004, z, lr, cell, bulge=0.006 * scale)
-    zl = top - 2 * pitch - lr - 0.045 * scale
+        if lenses:
+            m.disc_y(x, yf + 0.004, z, lr, cell, bulge=0.006 * scale)
+        if figures and figures[i]:          # (just in front of the lens: ours, or the game's put in the bezel)
+            lens_mask(m, x, yf + 0.0115 * scale, z, lr, figures[i])
+    zl = top - (n - 1) * pitch - lr - 0.045 * scale
     m.add([(x + 0.035 * scale, yf + 0.004, zl - 0.018 * scale), (x - 0.035 * scale, yf + 0.004, zl - 0.018 * scale),
            (x - 0.035 * scale, yf + 0.004, zl + 0.018 * scale), (x + 0.035 * scale, yf + 0.004, zl + 0.018 * scale)],
           [[0, 2, 1], [0, 3, 2]], cell_uv("white", [0, 1, 1, 0], [0, 0, 1, 1]), two_sided=True)
@@ -252,10 +346,49 @@ def _plate_only(code):
     return Q, remap[keep_t], UV[used]
 
 
-def traffic_light(bike=False, button=True, plates=()):
+def head_mount():
+    """(y of the head's back, height of its middle) on traffic_light()'s pole: where its switchable head goes."""
+    return POLE_R + 0.03, POLE_H - HEAD[2] / 2 - 0.02
+
+
+def bike_mount():
+    """(y of the back, height of the middle, scale) of traffic_light(bike=True)'s cyclists' head on its pole."""
+    return POLE_R + 0.03, BIKE_HEAD_Z, BIKE_SCALE
+
+
+PED_HEAD_Z = 2.45              # m: a crossing pole's pedestrians' head's middle over the ground
+CROSS_POLE_H = 2.95            # m: a crossing pole (its pedestrians' head at the top, the cyclists' under it)
+
+
+def ped_mount():
+    """(y of the back, height of the middle) of crossing_pole()'s pedestrians' head (two lenses, full size)."""
+    return POLE_R + 0.03, PED_HEAD_Z
+
+
+def signal_head(lenses=True, bike=False, ped=False):
+    """traffic_light()'s head alone with its clamps, its frame on the pole's axis at the head's middle; bike: its
+    cyclists' head (smaller, no clamps: bike_mount); ped: a crossing's pedestrians' head (two lenses, the red man
+    standing over the green one walking, its clamps: ped_mount)."""
+    m = Mesh()
+    if bike:
+        yb, _, s = bike_mount()
+        _head(m, yb, 0.0, scale=s, lenses=lenses, figures=("bike",) * 3)
+        return m.out()
+    yb, _ = head_mount()
+    h = _head_h(1.0, 2 if ped else 3)
+    _head(m, yb, 0.0, lenses=lenses, n=2 if ped else 3, figures=("stand", "walk") if ped else None)
+    for z in (h / 2 - 0.15, -h / 2 + 0.15):
+        m.lathe([(POLE_R + 0.008, z - 0.03), (POLE_R + 0.008, z + 0.03)], "black", seg=16, cap_top=True,
+                cap_bottom=True)
+        m.bar((0, 0.0, z), (0, POLE_R + 0.04, z), 0.06, 0.04, "black")
+    return m.out()
+
+
+def traffic_light(bike=False, button=True, plates=(), head=True):
     """The low signal: the ringed pole, the head at its top on its side facing +y, a cyclists' head lower down and the
     request button as options; plates: signs (codes) clamped to the same pole under the head, facing the same way
-    (Rotterdam's give-way triangle under the light, Street View 2026-10-22)."""
+    (Rotterdam's give-way triangle under the light, Street View 2026-10-22). head=False: the pole without its head
+    (the game puts its switchable one there: signal_head, head_mount)."""
     m = Mesh()
     z_top = POLE_H - HEAD[2] - 0.15
     for code in plates:
@@ -269,18 +402,34 @@ def traffic_light(bike=False, button=True, plates=()):
     _pole(m, POLE_R, POLE_H)
     w, d, h = HEAD
     zc = POLE_H - h / 2 - 0.02
-    _head(m, POLE_R + 0.03, zc)
-    for z in (zc + h / 2 - 0.15, zc - h / 2 + 0.15):              # its two clamps
-        m.lathe([(POLE_R + 0.008, z - 0.03), (POLE_R + 0.008, z + 0.03)], "black", seg=16, cap_top=True,
-                cap_bottom=True)
-        m.bar((0, 0.0, z), (0, POLE_R + 0.04, z), 0.06, 0.04, "black")
-    if bike:
-        _head(m, POLE_R + 0.03, 1.75, scale=0.55)
+    if head:
+        _head(m, POLE_R + 0.03, zc)
+        for z in (zc + h / 2 - 0.15, zc - h / 2 + 0.15):              # its two clamps
+            m.lathe([(POLE_R + 0.008, z - 0.03), (POLE_R + 0.008, z + 0.03)], "black", seg=16, cap_top=True,
+                    cap_bottom=True)
+            m.bar((0, 0.0, z), (0, POLE_R + 0.04, z), 0.06, 0.04, "black")
+    if bike:            # (head=False: its lenses the game's too, signal_head(bike=True): it read as lit, 2026-10-22)
+        yb, zb, s = bike_mount()
+        _head(m, yb, zb, scale=s, lenses=head)
     if button:
         m.rounded_box((0, POLE_R + 0.055, 1.12), 0.13, 0.10, 0.27, 0.02, 0.012, "black")
         m.add([(0.05, POLE_R + 0.106, 1.04), (-0.05, POLE_R + 0.106, 1.04), (-0.05, POLE_R + 0.106, 1.20),
                (0.05, POLE_R + 0.106, 1.20)], [[0, 2, 1], [0, 3, 2]], cell_uv("button", [0, 1, 1, 0], [0, 0, 1, 1]),
               two_sided=True)
+    return m.out()
+
+
+def crossing_pole(ped=True, bike=False):
+    """A signalled crossing's pole at its kerb (Rotterdam's: the ringed pole, lower than a junction's), its heads the
+    game's (tools/nl_signal_head.py; server kunstwerken.hide_heads): the pedestrians' head at its top (ped_mount)
+    looking across the road at the far kerb's pedestrians (-y), the cyclists' head under it (bike_mount) looking at
+    the cyclists arriving here (+y); the request button for those who wait here (+y)."""
+    m = Mesh()
+    _pole(m, POLE_R, CROSS_POLE_H if ped else BIKE_HEAD_Z + 0.5)
+    m.rounded_box((0, POLE_R + 0.055, 1.12), 0.13, 0.10, 0.27, 0.02, 0.012, "black")
+    m.add([(0.05, POLE_R + 0.106, 1.04), (-0.05, POLE_R + 0.106, 1.04), (-0.05, POLE_R + 0.106, 1.20),
+           (0.05, POLE_R + 0.106, 1.20)], [[0, 2, 1], [0, 3, 2]], cell_uv("button", [0, 1, 1, 0], [0, 0, 1, 1]),
+          two_sided=True)
     return m.out()
 
 
@@ -321,8 +470,12 @@ def _plate_outline(shape, size):
         return np.c_[size / 2 * np.cos(a), size / 2 * np.sin(a)]
     if shape == "square":
         return rrect(size, size, 0.03, n=3)
-    hgt = size * math.sqrt(3) / 2         # point down, its corners rounded
+    if shape == "diamond":
+        return np.array([[0, -size / 2], [size / 2, 0], [0, size / 2], [-size / 2, 0]])
+    hgt = size * math.sqrt(3) / 2         # point down (or up), its corners rounded
     corners = np.array([[0, -hgt * 2 / 3], [size / 2, hgt / 3], [-size / 2, hgt / 3]])
+    if shape == "triangle_up":
+        corners = -corners
     out = []
     rc = 0.045
     for i in range(3):
@@ -345,17 +498,29 @@ def _plate_outline(shape, size):
     return ring
 
 
+PLATE_GAP = 0.06            # m between two plates on one post
+
+
 def sign(code):
-    """A sign on its post: the plate's face toward +y, its back clamped to the post."""
-    shape, size = PLATES[code]
+    """A sign on its post: the plate's face toward +y, its back clamped to the post. code: one sign's, or a tuple of
+    the signs on one post from the top down (NDW's register puts several at one spot: one post, its plates stacked)."""
+    codes = (code,) if isinstance(code, str) else tuple(code)
     m = Mesh()
+    top = SIGN_TOP + 0.3 * (len(codes) - 1)      # (a post with more plates is taller: the lowest stays clear)
+    m.lathe([(SIGN_POST_R, -0.05), (SIGN_POST_R, top + 0.02), (SIGN_POST_R * 0.7, top + 0.04),
+             (0.001, top + 0.045)], "grey", seg=12)
+    for c_ in codes:
+        top = _sign_plate(m, c_, top) - PLATE_GAP
+    return m.out()
+
+
+def _sign_plate(m, code, top):
+    """A plate with its top at top on sign()'s post; returns its bottom."""
+    shape, size = PLATES[code]
     ring = _plate_outline(shape, size)
     lo, hi = ring.min(0), ring.max(0)
-    zc = SIGN_TOP - hi[1]
+    zc = top - hi[1]
     py = SIGN_POST_R + 0.045                     # the plate's back, off the post's axis
-    # the post and its cap
-    m.lathe([(SIGN_POST_R, -0.05), (SIGN_POST_R, zc + hi[1] + 0.02), (SIGN_POST_R * 0.7, zc + hi[1] + 0.04),
-             (0.001, zc + hi[1] + 0.045)], "grey", seg=12)
     # the plate: face, folded rim (a 2 cm lip back), back
     side = max(*(hi - lo))
     k = len(ring)
@@ -383,7 +548,7 @@ def sign(code):
         m.lathe([(SIGN_POST_R + 0.008, z - 0.025), (SIGN_POST_R + 0.008, z + 0.025)], "grey", seg=12,
                 cap_top=True, cap_bottom=True)
         m.bar((0, SIGN_POST_R, z), (0, py - 0.02, z), 0.03, 0.03, "grey")
-    return m.out()
+    return zc + lo[1]
 
 
 def gantry(span, h=6.6, signs=("route_havens", "route_centrum", "route_a13")):
@@ -543,8 +708,12 @@ def lamp_post(h=8.0, arm=1.6):
     return m.out()
 
 
+TRAM_POLE_ARM_Z = 7.5 - 0.75    # m: tram_pole()'s cantilever tip over its foot (the span wire hangs from it)
+
+
 def tram_pole(reach=2.5, h=7.5):
-    """A tram line's mast: a grey pole and its cantilever out toward +y over the track (the wire left out)."""
+    """A tram line's mast: a grey pole and its cantilever out toward +y over the track (the wire: tools/kunstwerk_solid.py,
+    render-only)."""
     m = Mesh()
     m.lathe([(0.16, 0.0), (0.16, 0.03), (0.1, 0.03), (0.1, 0.5), (0.08, h)], "grey", seg=12)
     m.lathe([(0.08, h), (0.001, h + 0.04)], "grey", seg=12)

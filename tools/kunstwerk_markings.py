@@ -103,7 +103,8 @@ def simplify(ring, tol):
         a, b = pts[0], pts[-1]
         ab = b - a
         L = np.hypot(*ab)
-        d = np.abs(np.cross(ab, pts - a)) / L if L > 1e-9 else np.hypot(*(pts - a).T)
+        q_ = pts - a
+        d = np.abs(ab[0] * q_[:, 1] - ab[1] * q_[:, 0]) / L if L > 1e-9 else np.hypot(*q_.T)
         i = int(np.argmax(d))
         if d[i] <= tol:
             return np.array([a, b])

@@ -273,6 +273,9 @@ def build(aid, lat, lon, hm_zoom, q, cx, cy, size, out_dir, name, ter_name=None)
                                          _s.surface.urban, _s.widths, _open_tunnels(g, keep))
         idx = (surfacemod.paint_lots(idx, keep["lat"], keep["lon"], _s.surface.lots(keep["lat"], keep["lon"]))
             if hasattr(_s.surface, "lots") else idx)
+        if getattr(_s, "bgt", None) is not None:    # (no ground cover through a kunstwerk's rails)
+            import kunstwerken as kwmod
+            idx[kwmod.bare(keep["lat"], keep["lon"]).reshape(idx.shape)] = surfacemod.DIRT
         stages["roadPaint"] = time.perf_counter() - t1
         info["layers"] = surfacemod.write_masks(idx[::-1], out_dir, name[:-4])
         info["surfaceComplete"] = complete and roads_complete
@@ -327,11 +330,26 @@ def navgraph(aid, lat, lon, zoom, x, y, out_dir, vfs_dir, serial, left_hand, mph
     except Exception as e:          # no decks: the graph follows the ground under bridges
         log.debug("navgraph decks: %s: %s", type(e).__name__, e)
     urban = _s.surface.urban if _s.surface is not None else None
+    mapped = mapped_controls(_s.md, frame, (x - w, y - w, x + w, y + w))
     graph = navgraphmod.build(frame, feats, elev, (x, y), urban, decks=decks, widths=_s.widths, left_hand=left_hand,
-                              mph=mph)
+                              mph=mph, mapped=mapped)
+    if getattr(_s, "bgt", None) is not None:    # (--nl-bgt: the kunstwerken stand in the road tiles, their signals too)
+        import kunstwerken as kwmod
+        kwmod.hide_heads(frame, graph["signals"], graph, mapped)
     graph["rules"] = rules
     path = navgraphmod.write(out_dir, vfs_dir, aid, serial, graph)
     return path, len(graph["nodes"]), len(graph["edges"])
+
+
+def mapped_controls(md, frame, box):
+    """furniture.Mapped round box: the mapped signals and signs the junctions there follow (the road tiles' props and
+    the AI graph alike); None where the map data cannot be had (the junction rule, as before)."""
+    import furniture
+    try:
+        return furniture.Mapped.load(md, frame, box)
+    except Exception as e:
+        log.warning("mapped controls: %s: %s", type(e).__name__, e)
+        return None
 
 
 def roads_tile(aid, lat, lon, zoom, tx, ty, out_dir, vfs_dir, sidewalks, lift, buildings=False, left_hand=False,
@@ -371,7 +389,8 @@ def roads_tile(aid, lat, lon, zoom, tx, ty, out_dir, vfs_dir, sidewalks, lift, b
     chunks = roadsmod.build_tile(frame, tx, ty, cells, elev, urban, walks=walks, deck_context=ctx, bridges=bridges, widths=_s.widths,
                                  props=props, lines=lines, wires=wires, town=town, park=park,
                                  left_hand=left_hand, mph=mph, structures=buildingsmod.centres(items, tx, ty) if items else (),
-                                 tunnels=tunnels, walls=rwalls)
+                                 tunnels=tunnels, walls=rwalls,
+                                 mapped=mapped_controls(_s.md, frame, roadsmod.tile_bbox(tx, ty)) if buildings else None)
     if _s.airports is not None:         # runway markings, drawn by the road mesh like the lane lines
         chunks += _s.airports.tile_chunks(frame, tx, ty, elev, roadsmod.tile_bbox)
     x0, y0, _, _ = roadsmod.tile_bbox(tx, ty)
@@ -442,24 +461,21 @@ def roads_tile(aid, lat, lon, zoom, tx, ty, out_dir, vfs_dir, sidewalks, lift, b
             bw = bgtmod.walls(frame, box, _s.bgt.features(frame, tx, ty, (bgtmod.WALLS,)), dug, raw,
                               passes=passes)
             if bw and kws:              # (a kunstwerk's own walls stand there)
-                def kw_free(w):
-                    b = np.asarray(w["base"], np.float64)
-                    bla, blo, _ = frame.enu_to_geodetic(b[:, 0], b[:, 1], np.zeros(len(b)))
-                    return not any(k.in_box(np.asarray(bla), np.asarray(blo)).any() for k in kws)
-                bw = [w for w in bw if kw_free(w)]
+                bw = [w for w in bw if not kwmod.keep_out(frame, np.asarray(w["base"])[:, :2], kws).any()]
             if bw:
                 rwalls[:] = bw
             if props is not None:
                 lamps = bgtmod.lamps(frame, box, _s.bgt.features(frame, tx, ty, (bgtmod.POLES,)), polys, elev)
                 if lamps:
                     props[:] = [r for r in props if r[0] != "streetlight"] + lamps
-                if kws and props:       # (a kunstwerk's own furniture stands there: none of ours in its box)
-                    xy = np.asarray([[r[1], r[2]] for r in props], np.float64)
-                    pla, plo, _ = frame.enu_to_geodetic(xy[:, 0], xy[:, 1], np.zeros(len(xy)))
-                    inb = np.zeros(len(xy), bool)
-                    for k in kws:
-                        inb |= k.in_box(np.asarray(pla), np.asarray(plo))
-                    props[:] = [r for r, b in zip(props, inb) if not b]
+                if kws and props:       # (a kunstwerk's own furniture stands there: none of ours in its footprint)
+                    out = kwmod.keep_out(frame, [[r[1], r[2]] for r in props], kws)
+                    props[:] = [r for r, o in zip(props, out) if not o]
+            if kws and wires:           # (nor our utility wires over it: their poles are props, gone above)
+                wires[:] = [w for w in wires if not kwmod.keep_out(frame, np.asarray(w)[:, :2], kws).any()]
+            if kws and wires is not None:   # its own: the tram's overhead line
+                for k in kws:
+                    wires.extend(k.tile_wires(frame, box))
         except Exception as e:
             log.warning("bgt walls / lamps of tile %s_%s: %s: %s", tx, ty, type(e).__name__, e)
         if kws:                     # where a kunstwerk draws its streets, nothing of ours over them (its rails, paint)

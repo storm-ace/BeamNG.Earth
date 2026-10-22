@@ -517,7 +517,8 @@ def main(argv=None):
                         while t_ + 0.5 <= hi:
                             base = c_ + left * (t_ + 0.25)
                             tri = np.array([base - left * 0.25, base + left * 0.25, base - f_ * 0.6])
-                            white(tri[::-1] if np.cross(tri[1] - tri[0], tri[2] - tri[0]) < 0 else tri)
+                            e1_, e2_ = tri[1] - tri[0], tri[2] - tri[0]
+                            white(tri[::-1] if e1_[0] * e2_[1] - e1_[1] * e2_[0] < 0 else tri)
                             t_ += 0.75
                             n_teeth += 1
     count["teeth"] = n_teeth
