@@ -180,13 +180,16 @@ end
 local function makeHead(inst, a)
   if not inst.createSignalObject then return end
   -- a[12]: the head's own shape where the server names one (a kunstwerk's Dutch head on its pole, kunstwerken.py)
-  if a[8] then placeHead(inst, inst.name, a[8], a[9], a[10], a[11], type(a[12]) == 'string' and a[12] or M.SIGNAL_SHAPE) end
+  if a[8] then
+    placeHead(inst, inst.name, a[8], a[9], a[10], a[11], type(a[12]) == 'string' and a[12] or M.SIGNAL_SHAPE)
+  end
   -- a[13]: more heads that show this approach's light ({x, y, z, yaw, shape}): a kunstwerk's repeater on the median
   -- and the heads on its poles for the cyclists beside it (kunstwerken.hide_heads); one instance switches them all
   if type(a[13]) == 'table' then
     for k, e in ipairs(a[13]) do
       if type(e) == 'table' and e[1] then
-        placeHead(inst, inst.name .. '#' .. k, e[1], e[2], e[3], e[4], type(e[5]) == 'string' and e[5] or M.SIGNAL_SHAPE)
+        local shape = type(e[5]) == 'string' and e[5] or M.SIGNAL_SHAPE
+        placeHead(inst, inst.name .. '#' .. k, e[1], e[2], e[3], e[4], shape)
       end
     end
   end

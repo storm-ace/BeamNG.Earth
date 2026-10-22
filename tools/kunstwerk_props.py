@@ -27,6 +27,7 @@ POLE_R, POLE_H = 0.057, 3.3
 BAND = (0.3, 1.9)               # m: where the rings start, and one atlas cell's 8 rings over this much (1.6 m)
 HEAD = (0.36, 0.22, 1.02)       # m: the head's width, depth, height (a stadium)
 LENS_R = 0.105                  # m: a 200 mm lens
+BIKE_HEAD_Z, BIKE_SCALE = 1.75, 0.55    # m: the cyclists' head's middle on a light's pole, and its size to the head's
 SIGN_POST_R = 0.030
 PLATES = {"B6": ("triangle", 0.90), "G11": ("disc", 0.60), "D2": ("disc", 0.70), "L2": ("square", 0.60)}
 # the rest of the RVV by its series (BABW, built-up area sizes): B1/B2 a diamond, B3-B5 and J a triangle point up, G, L
@@ -281,9 +282,19 @@ def head_mount():
     return POLE_R + 0.03, POLE_H - HEAD[2] / 2 - 0.02
 
 
-def signal_head(lenses=True):
-    """traffic_light()'s head alone with its clamps, its frame on the pole's axis at the head's middle."""
+def bike_mount():
+    """(y of the back, height of the middle, scale) of traffic_light(bike=True)'s cyclists' head on its pole."""
+    return POLE_R + 0.03, BIKE_HEAD_Z, BIKE_SCALE
+
+
+def signal_head(lenses=True, bike=False):
+    """traffic_light()'s head alone with its clamps, its frame on the pole's axis at the head's middle; bike: its
+    cyclists' head (smaller, no clamps: bike_mount)."""
     m = Mesh()
+    if bike:
+        yb, _, s = bike_mount()
+        _head(m, yb, 0.0, scale=s, lenses=lenses)
+        return m.out()
     yb, _ = head_mount()
     _head(m, yb, 0.0, lenses=lenses)
     for z in (HEAD[2] / 2 - 0.15, -HEAD[2] / 2 + 0.15):
@@ -317,8 +328,9 @@ def traffic_light(bike=False, button=True, plates=(), head=True):
             m.lathe([(POLE_R + 0.008, z - 0.03), (POLE_R + 0.008, z + 0.03)], "black", seg=16, cap_top=True,
                     cap_bottom=True)
             m.bar((0, 0.0, z), (0, POLE_R + 0.04, z), 0.06, 0.04, "black")
-    if bike:
-        _head(m, POLE_R + 0.03, 1.75, scale=0.55)
+    if bike:            # (head=False: its lenses the game's too, signal_head(bike=True): it read as lit, 2026-10-22)
+        yb, zb, s = bike_mount()
+        _head(m, yb, zb, scale=s, lenses=head)
     if button:
         m.rounded_box((0, POLE_R + 0.055, 1.12), 0.13, 0.10, 0.27, 0.02, 0.012, "black")
         m.add([(0.05, POLE_R + 0.106, 1.04), (-0.05, POLE_R + 0.106, 1.04), (-0.05, POLE_R + 0.106, 1.20),

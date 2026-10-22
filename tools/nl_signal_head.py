@@ -8,7 +8,8 @@ triangles (art/shapes/objects/s_trafficlight_boom_sn.dae, its pole head), moved 
     python3 tools/nl_signal_head.py [--game "<BeamNG.drive folder>"]
 
 Writes mod/beamng_earth/levels/beamng_earth/art/shapes/beamngEarth/bne_nl_signal.cdae: its frame on the pole's axis at
-the head's middle, its face toward +y (kunstwerk_props.head_mount: where it hangs on a pole)."""
+the head's middle, its face toward +y (kunstwerk_props.head_mount: where it hangs on a pole); and
+bne_nl_signal_bike.cdae, the cyclists' head under it (kunstwerk_props.bike_mount)."""
 import argparse
 import os
 import sys
@@ -22,6 +23,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "..", "server"))
 import cdae  # noqa: E402
 import kunstwerk_props as kit  # noqa: E402
+from kunstwerken import two_sided_apart  # noqa: E402
 
 OUT = os.path.join(HERE, "..", "mod", "beamng_earth", "levels", "beamng_earth", "art", "shapes", "beamngEarth",
                    "bne_nl_signal.cdae")
@@ -74,8 +76,12 @@ def stock_lenses(game):
     raise SystemExit(f"{STOCK}: no {LENS_MAT} triangles")
 
 
-def build(game):
-    P0, T0, UV0 = kit.signal_head(lenses=False)
+def build(game, bike=False):
+    """The head's mesh (positions, tris, uvs, normals, colours, tri materials, lens normals); bike: the cyclists' head
+    lower on the pole (kunstwerk_props.bike_mount: its fixed lenses read as lit under the switchable head, the user
+    2026-10-22), the same lenses at its scale."""
+    # (its number plate is two-sided: the back on vertices of its own, else the engine's normals there are noise)
+    P0, T0, UV0 = two_sided_apart(*kit.signal_head(lenses=False, bike=bike))
     P, N, UV, C, centres = stock_lenses(game)
     # the stock lenses face along their mean normal: turned to face +y, scaled to our lens pitch, centred in our bezels
     f = N.mean(0)
@@ -84,14 +90,17 @@ def build(game):
     ang = np.arctan2(f[0], f[1])                        # rotation about z taking f to +y
     ca, sa = np.cos(ang), np.sin(ang)
     R = np.array([[ca, -sa, 0.0], [sa, ca, 0.0], [0.0, 0.0, 1.0]])
-    zs, lr = kit.head_lenses()
+    if bike:
+        yb, _, scale = kit.bike_mount()
+    else:
+        (yb, _), scale = kit.head_mount(), 1.0
+    zs, lr = kit.head_lenses(scale)
     stock_pitch = (centres[0][2] - centres[2][2]) / 2
     s = (zs[0] - zs[2]) / 2 / stock_pitch
     mid = centres[1]
     Q = (P - mid) @ R.T * s
     Nq = N @ R.T
-    yb, _ = kit.head_mount()
-    front = yb + kit.HEAD[1] + 0.006
+    front = yb + kit.HEAD[1] * scale + 0.006 * scale
     Q[:, 1] += front - Q[:, 1].max()                    # (just proud of the head's face)
     Q[:, 2] += zs[1]
     n0 = len(P0)
@@ -101,8 +110,9 @@ def build(game):
     normals = None
     colors = np.r_[np.full((n0, 4), 255, np.uint8), C]
     tm = np.r_[np.zeros(len(T0), np.int64), np.ones(len(Q) // 3, np.int64)]
-    print(f"head {len(T0)} triangles, lenses {len(Q) // 3} (stock pitch {stock_pitch:.3f} m, scale {s:.2f}, "
-          f"turned {np.degrees(ang):.0f} deg)")
+    what = "cyclists' head" if bike else "head"
+    print(f"{what} {len(T0)} triangles, lenses {len(Q) // 3} (stock pitch "
+          f"{stock_pitch:.3f} m, scale {s:.2f}, turned {np.degrees(ang):.0f} deg)")
     return positions, tris, uvs, normals, colors, tm, Nq
 
 
@@ -111,10 +121,11 @@ def main(argv=None):
     ap.add_argument("--game", default=GAME, help="the BeamNG.drive folder (its content/art_shapes.zip)")
     ap.add_argument("--out", default=OUT)
     a = ap.parse_args(argv)
-    positions, tris, uvs, _, colors, tm, _ = build(a.game)
-    n = cdae.write(a.out, positions, tris, uvs=uvs, material=[kit.MATERIAL, LENS_MAT], tri_materials=tm,
-                   colors=colors, object_name="signal")
-    print(f"{os.path.relpath(a.out, os.path.join(HERE, '..'))}: {n} bytes")
+    for bike, out in ((False, a.out), (True, a.out.replace(".cdae", "_bike.cdae"))):
+        positions, tris, uvs, _, colors, tm, _ = build(a.game, bike)
+        n = cdae.write(out, positions, tris, uvs=uvs, material=[kit.MATERIAL, LENS_MAT], tri_materials=tm,
+                       colors=colors, object_name="signal")
+        print(f"{os.path.relpath(out, os.path.join(HERE, '..'))}: {n} bytes")
 
 
 if __name__ == "__main__":

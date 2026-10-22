@@ -180,6 +180,28 @@ class FootprintTest(unittest.TestCase):
         self.assertAlmostEqual(a[7], h[0], places=1)
         self.assertEqual(a[11], kunstwerken.HEAD_SHAPE)
 
+    def test_cyclists_head_under_it_and_a_cycle_paths_light(self):
+        """A pole's cyclists' head ("bike") switches with the head over it (its own shape); a cycle path's light
+        ("cycle") gets no car approach made for it, though a mapped signal stands on the road beside it."""
+        from types import SimpleNamespace
+        self.k.signals = [(np.array([-3.0, -2.0, 4.2]), np.array([1.0, 0.0])),
+                          (np.array([-3.0, -2.0, 2.6]), np.array([1.0, 0.0]))]
+        self.k.signal_kinds = ["", "bike"]
+        stop = self.enu(2.0, 0.0)
+        a = ["c1"] + stop + [0.0, -1.0, 0.0, 0, None, None, None, None]
+        kunstwerken.hide_heads(self.frame, [{"j": "n1", "kind": "signal", "app": [a]}])
+        self.assertEqual(a[11], kunstwerken.HEAD_SHAPE)
+        self.assertEqual([e[4] for e in a[12]], [kunstwerken.HEAD_SHAPE_BIKE])
+        self.assertAlmostEqual(a[12][0][2], 2.6, places=1)
+        self.k.signals = [(np.array([0.0, 5.0, 4.2]), np.array([0.0, -1.0]))]
+        self.k.signal_kinds = ["cycle"]
+        h = self.enu(0.0, 5.0)
+        graph = {"nodes": {"n1": [h[0] + 2.0, h[1] - 30.0, 1.0, 3.0], "n2": [h[0] + 2.0, h[1] + 30.0, 1.0, 3.0]},
+                 "edges": [["n1", "n2", 1, 1, 0, 13.9, 1.0, 3.0]]}
+        sig = []
+        kunstwerken.hide_heads(self.frame, sig, graph, SimpleNamespace(pts={"signal": np.array([[h[0] + 2.0, h[1]]])}))
+        self.assertEqual(sig, [])
+
     def test_cyclists_head_shows_the_parallel_approach(self):
         """A head for no car road (a cycle path's light) shows the light of the approach beside it along its axis."""
         self.k.signals = [(np.array([-3.0, -6.0, 4.2]), np.array([1.0, 0.0]))]
@@ -210,6 +232,31 @@ class BareTest(unittest.TestCase):
                                           err_msg="at the rail's end; its middle 1.5 m off it; 6 m and 8 m off it")
         finally:
             kunstwerken._all = saved
+
+
+class TwoSidedTest(unittest.TestCase):
+    """A thin part seen from both sides (a sign's face: each triangle and its reverse) has its back on vertices of its
+    own: on shared ones the engine's vertex normals summed +n and -n to rounding noise, a direction at random per
+    vertex, and the E1 plate's face showed radial streaks in game (2026-10-22)."""
+
+    def test_back_on_its_own_vertices(self):
+        import cdae
+        a = np.linspace(0, 2 * np.pi, 12, endpoint=False)
+        P = np.r_[[[0.0, 0.0, 2.0]], np.c_[0.3 * np.cos(a), np.zeros(12), 2.0 + 0.3 * np.sin(a)]]
+        P = P @ np.array([[np.cos(0.37), np.sin(0.37), 0], [-np.sin(0.37), np.cos(0.37), 0], [0, 0, 1]])
+        T = np.array([[0, (i + 1) % 12 + 1, i + 1] for i in range(12)])
+        T2 = np.r_[T, T[:, ::-1], [[1, 2, 3]]]          # (and one more, one-sided, not paired)
+        UV = np.c_[np.arange(13.0), np.arange(13.0)]
+        P2, T3, UV2 = kunstwerken.two_sided_apart(P, T2, UV)
+        self.assertEqual(len(P2), 26)
+        self.assertEqual(T3[:12].tolist(), T.tolist(), "the front as it was")
+        np.testing.assert_array_equal(UV2[T3[12:24]], UV[T[:, ::-1]], "the back: the same UVs")
+        N = cdae.face_normal_sum(P2, T3[:24])
+        fn = np.cross(P[T[0, 1]] - P[T[0, 0]], P[T[0, 2]] - P[T[0, 0]])
+        fn /= np.linalg.norm(fn)
+        np.testing.assert_allclose(N[np.unique(T3[:12])] @ fn, 1.0, atol=1e-9)
+        np.testing.assert_allclose(N[np.unique(T3[12:24])] @ fn, -1.0, atol=1e-9)
+        self.assertIs(kunstwerken.two_sided_apart(P, T, UV)[1], T, "nothing two-sided: as it was")
 
 
 class ShippedPaintTest(unittest.TestCase):

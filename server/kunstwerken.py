@@ -70,6 +70,36 @@ def _lowest(z, r):
     return out
 
 
+def two_sided_apart(P, T, UV=None):
+    """(P, T, UV) with each triangle that is another's reverse (a thin part seen from both sides: tools/kunstwerk_props
+    Mesh.add's two_sided, a sign's face, a lens) on vertices of its own. On shared ones the engine's vertex normal
+    (cdae.face_normal_sum: the adjacent faces' normals summed) is the rounding left of +n - n, a direction at random
+    per vertex: the plates' faces shaded in radial streaks (the E1 plate, in game 2026-10-22). Pure."""
+    P, T = np.asarray(P), np.asarray(T, np.int64)
+    if not len(T):
+        return P, T, UV
+    n = max(int(T.max()) + 1, len(P))
+    r = np.argmin(T, axis=1)                    # each triangle turned to start at its lowest vertex: its oriented key
+    rows = np.arange(len(T))
+    a, b, c = T[rows, r], T[rows, (r + 1) % 3], T[rows, (r + 2) % 3]
+    fwd, rev = (a * n + b) * n + c, (a * n + c) * n + b
+    keys, first = np.unique(fwd, return_index=True)
+    i = np.searchsorted(keys, rev)
+    i = np.minimum(i, len(keys) - 1)
+    back = (keys[i] == rev) & (first[i] < rows)     # the later of each pair
+    if not back.any():
+        return P, T, UV
+    used = np.unique(T[back])
+    remap = np.arange(n)
+    remap[used] = n + np.arange(len(used))
+    T = T.copy()
+    T[back] = remap[T[back]]
+    P = np.concatenate([P, P[used]])
+    if UV is not None:
+        UV = np.concatenate([np.asarray(UV), np.asarray(UV)[used]])
+    return P, T, UV
+
+
 def _inside(ring, px, py):
     x, y = ring[:, 0], ring[:, 1]
     ins = np.zeros(len(px), bool)
@@ -91,10 +121,14 @@ class Kunstwerk:
         self.tm = np.asarray(data["tri_material"], np.int64)
         self.decks = [(np.asarray(d["ring"], np.float64), np.asarray(d["plane"], np.float64)) for d in data.get("decks", ())]
         self.UV = np.asarray(data["uvs"], np.float64) if "uvs" in data else None
+        self.P, self.T, self.UV = two_sided_apart(self.P, self.T, self.UV)     # (its signs' faces: their own normals)
         # its traffic lights' heads (tools/kunstwerk_export.py): the middle of each, RD metres from the origin and NAP,
         # and the way it looks; the game switches them (hide_heads)
         self.signals = [(np.asarray(s["at"], np.float64), np.asarray(s["facing"], np.float64))
                         for s in data.get("signals", ())]
+        # "bike": a cyclists' head under the head before it on its pole; "cycle": a cycle path's light alone
+        self.signal_kinds = ["bike" if s.get("bike") else "cycle" if s.get("cycle") else ""
+                             for s in data.get("signals", ())]
         self.wires = [np.asarray(w, np.float64) for w in data.get("wires", ()) if len(w) >= 2]    # (its overhead line)
         fl = data.get("floor")
         if fl:
@@ -341,6 +375,7 @@ def keep_out(frame, xy, kws=None):
 
 
 HEAD_SHAPE = "/levels/beamng_earth/art/shapes/beamngEarth/bne_nl_signal.cdae"     # tools/nl_signal_head.py
+HEAD_SHAPE_BIKE = "/levels/beamng_earth/art/shapes/beamngEarth/bne_nl_signal_bike.cdae"   # (the cyclists' under it)
 HEAD_FACING = 0.6           # cos: a head looks at its traffic within ~53 degrees
 # m: where along an approach (from its stop point, along its traffic) its kunstwerk heads may stand: a little before it
 # (the graph's stop point is its junction's widest arm plus 2 m, the painted line can lie a few metres farther out) to
@@ -351,7 +386,7 @@ HEAD_ACROSS_M = 12.0        # m a head stands at most beside its approach's line
 EDGE_ACROSS_M = 10.0        # m a head stands at most beside a graph edge it is made an approach on
 HEAD_UP_M = (0.5, 8.0)      # m a head stands over the road it shows (not the trench's lanes under a deck's street)
 MAPPED_ON_ROAD_M = 3.5      # m: a mapped signal point this near an edge's line is on that road (not a cycle path's)
-PAST_LINE_M = 1.0           # m a head stands past its stop line (a Dutch primary: just after it, tools/kunstwerk_placement)
+PAST_LINE_M = 1.0           # m a head stands past its stop line (a Dutch primary: just after it)
 JOIN_M = 60.0               # m from a signalled junction's node an approach made for a head joins its phases
 PARALLEL = 0.5              # cos: an approach this near a head's axis shows its light (the cyclists' beside it)
 ATTACH_M = 50.0             # m from a head that approach's stop point may lie (the oval's cycle crossings: 43 m)
@@ -363,20 +398,21 @@ def _yaw(fx, fy):
     return round(math.degrees(math.atan2(-fx, fy)) % 360.0, 1)
 
 
-def _head_rec(h):
+def _head_rec(h, shape=HEAD_SHAPE):
     x, y, z, fx, fy = h
-    return [round(x, 2), round(y, 2), round(z, 2), _yaw(fx, fy), HEAD_SHAPE]
+    return [round(x, 2), round(y, 2), round(z, 2), _yaw(fx, fy), shape]
 
 
-def _give(a, h):
-    """Head h shows approach a: its first head in a[7:12], the others in a[12] (navgraph.lua: one signal instance, all
-    its heads switched together)."""
+def _give(a, h, bikes=()):
+    """Head h shows approach a, and the cyclists' heads under it on its pole (bikes): its first head in a[7:12], the
+    others in a[12] (navgraph.lua: one signal instance, all its heads switched together)."""
+    recs = [_head_rec(h)] + [_head_rec(b, HEAD_SHAPE_BIKE) for b in bikes]
     if a[7] is None:
-        a[7:] = _head_rec(h)
-        return
-    if len(a) < 13:
-        a.append([])
-    a[12].append(_head_rec(h))
+        a[7:] = recs.pop(0)
+    if recs:
+        if len(a) < 13:
+            a.append([])
+        a[12] += recs
 
 
 def _edge_for(h, graph, sig_pts):
@@ -440,7 +476,17 @@ def hide_heads(frame, signals, graph=None, mapped=None):
     kws = all_kunstwerken()
     if not kws:
         return signals
-    heads = [h for k in kws for h in k.heads(frame)]
+    heads, bikes, cycle = [], {}, set()
+    for k in kws:
+        hs = k.heads(frame)
+        for h, kind in zip(hs, (list(getattr(k, "signal_kinds", ())) + [""] * len(hs))[:len(hs)]):
+            if kind == "bike" and heads:        # (a cyclists' head under the one before it, on its pole)
+                bikes[id(heads[-1])].append(h)
+                continue
+            heads.append(h)
+            bikes[id(h)] = []
+            if kind == "cycle":
+                cycle.add(id(h))
     spots = [(i, j) for i, s in enumerate(signals) for j, a in enumerate(s["app"])]
     hit = keep_out(frame, [signals[i]["app"][j][1:3] for i, j in spots]) if spots else []
     ours = [signals[i]["app"][j] for (i, j), h in zip(spots, hit) if h]
@@ -466,7 +512,7 @@ def hide_heads(frame, signals, graph=None, mapped=None):
         if best is None:
             left.append(h)
             continue
-        _give(best[1], h)
+        _give(best[1], h, bikes[id(h)])
         n_app += 1
     if graph is not None and left:
         import furniture
@@ -475,7 +521,7 @@ def hide_heads(frame, signals, graph=None, mapped=None):
         pts = np.zeros((0, 2)) if pts is None else np.asarray(pts, np.float64).reshape(-1, 2)
         rest = []
         for h in left:
-            got = _edge_for(h, graph, pts)
+            got = None if id(h) in cycle else _edge_for(h, graph, pts)     # (no car stops at a cycle path's light)
             if got is None:
                 rest.append(h)
                 continue
@@ -486,7 +532,7 @@ def hide_heads(frame, signals, graph=None, mapped=None):
                     and abs(float(t[0] * (a[2] - stop[1]) - t[1] * (a[1] - stop[0]))) < 3.0
                     and abs(float(t @ np.array([a[1] - stop[0], a[2] - stop[1]]))) < HEAD_AHEAD_M]
             if same:
-                _give(min(same, key=lambda a: math.hypot(a[1] - stop[0], a[2] - stop[1])), h)
+                _give(min(same, key=lambda a: math.hypot(a[1] - stop[0], a[2] - stop[1])), h, bikes[id(h)])
                 n_app += 1
                 continue
 
@@ -499,12 +545,16 @@ def hide_heads(frame, signals, graph=None, mapped=None):
             axis = next((np.asarray(a[4:6], np.float64) for a in rec["app"] if a[6] == 0), t)
             a = [a_, round(float(stop[0]), 2), round(float(stop[1]), 2), round(ez, 2), round(float(t[0]), 4),
                  round(float(t[1]), 4), 0 if abs(float(t @ axis)) > 0.7 else 1, None, None, None, None]
-            _give(a, h)
+            _give(a, h, bikes[id(h)])
             rec["app"].append(a)
             ours.append(a)
             n_made += 1
         left = rest
     rest = []
+    # (an approach's junction: a cycle crossing's head stands by the junction, its approach of the same axis can stop
+    # 50 m off on the far side, the 's-Gravendijkwal's north crossing, 2026-10-22)
+    nodes = (graph or {}).get("nodes") or {}
+    jxy = {id(a): nodes[s["j"]][:2] for s in signals if s["j"] in nodes for a in s["app"]}
     for h in left:
         x, y, z, fx, fy = h
         best = None
@@ -512,6 +562,8 @@ def hide_heads(frame, signals, graph=None, mapped=None):
             inc = np.asarray(a[4:6], np.float64)
             c = -(fx * inc[0] + fy * inc[1])            # (1: it looks at that traffic, -1: at the other way's)
             d = math.hypot(x - a[1], y - a[2])
+            if id(a) in jxy:
+                d = min(d, math.hypot(x - jxy[id(a)][0], y - jxy[id(a)][1]))
             # the same way first, then the other way's (one axis, one phase), at last the nearest whose traffic comes
             # its way at all (a cycle crossing at an angle: the oval's east side, 2026-10-22)
             tier = 0 if c >= PARALLEL else 1 if c <= -PARALLEL else 2 if c >= LAST_FACING else None
@@ -522,7 +574,7 @@ def hide_heads(frame, signals, graph=None, mapped=None):
         if best is None:
             rest.append(h)
             continue
-        _give(best[1], h)
+        _give(best[1], h, bikes[id(h)])
         n_side += 1
     log.info("kunstwerk heads: %d of %d on the graph's signalled approaches, %d on approaches made for them, %d "
              "beside a parallel one (cyclists), %d on none", n_app, len(heads), n_made, n_side, len(rest))

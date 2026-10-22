@@ -4,7 +4,7 @@
 reached) and the faces of traffic lights, on a 4 x 4 grid of 256 px cells. tools/kunstwerk_props.py
 maps its plates to the cells by CELLS.
 
-    python3 tools/sign_atlas.py
+    python3 tools/sign_atlas.py [--offline] [--only lens_*,A1_*]
 """
 import os
 
@@ -54,6 +54,12 @@ RVV = ("A1", "A2", "B1", "B2", "B3", "B4", "B5", "C1", "C2", "C3", "C4", "C7", "
        "L9")
 for _i, _code in enumerate(RVV):
     CELLS.setdefault(_code, 46 + _i)
+# the speed limits (A1) with the number NDW's register gives (its blackCode / textSigns, tools/kunstwerk_placement.py
+# ndw_signs): drawn here, each its cell ("A1_50"); the plain A1 cell is Commons' with its 50 (every A1 plate showed
+# that 50, the user 2026-10-22)
+SPEEDS = (15, 20, 30, 40, 50, 60, 70, 80, 90, 100, 120)
+for _i, _n in enumerate(SPEEDS):
+    CELLS.setdefault(f"A1_{_n}", 46 + len(RVV) + _i)
 COMMONS = {code: f"Nederlands verkeersbord {code}.svg" for code in ("B6", "G11", "D2", "L2") + RVV}
 CACHE = os.environ.get("BNE_SIGN_CACHE") or os.path.join(HERE, "..", "..", "design", "kunstwerken", "_textures",
                                                           "signs")
@@ -193,14 +199,33 @@ def bicycle(d, x, y, s, col):
     d.line([(x + 32 * s, y - 32 * s), (x + 26 * s, y - 52 * s), (x + 40 * s, y - 54 * s)], fill=col, width=w)
 
 
-def commons(title):
-    """The sign's PNG as Commons renders its SVG (cached), RGBA; None when it cannot be had."""
+def speed_limit(d, x, y, n):
+    """An A1 (RVV 1990, BABW): a white disc in a red ring (a fifth of its radius), the limit in black DIN figures."""
+    d.rectangle([x, y, x + C, y + C], fill=(150, 152, 150))
+    d.ellipse([x + 6, y + 6, x + C - 6, y + C - 6], fill=RED)
+    ring = (C / 2 - 6) * 0.2
+    d.ellipse([x + 6 + ring, y + 6 + ring, x + C - 6 - ring, y + C - 6 - ring], fill=WHITE)
+    text = str(n)
+    room = (C - 12 - 2 * ring) * (0.72 if len(text) < 3 else 0.8)
+    size = int(C * 0.5)
+    font = _font(size)
+    while d.textlength(text, font=font) > room and size > 20:
+        size -= 4
+        font = _font(size)
+    d.text((x + C / 2, y + C / 2 + 2), text, font=font, fill=BLACK, anchor="mm")
+
+
+def commons(title, fetch=True):
+    """The sign's PNG as Commons renders its SVG (cached), RGBA; None when it cannot be had (or is not in the cache
+    and fetch is off)."""
     import json
     import urllib.parse
     import urllib.request
     os.makedirs(CACHE, exist_ok=True)
     dst = os.path.join(CACHE, title.replace(" ", "_").replace(".svg", ".png"))
     if not os.path.exists(dst):
+        if not fetch:
+            return None
         import time
         import urllib.error
         hdr = {"User-Agent": "beamng-earth-tools/1.0 (https://github.com/storm-ace/BeamNG.Earth)"}
@@ -259,8 +284,8 @@ def metal(im):
         n = gaussian_filter(rng.normal(0, 1, (C, C)), 1.5) * 3
         a[r] = np.clip(a[r] + n[..., None], 0, 255)
         rough[r] = 120 + n * 4                            # powder coat: satin
-    for name in ("B6", "G11", "D2", "L2") + RVV:
-        rough[region(name)] = 110                         # the sign film: smooth, not a mirror
+    for name in ("B6", "G11", "D2", "L2") + RVV + tuple(f"A1_{n}" for n in SPEEDS):
+        rough[region(name)] = 110                        # the sign film: smooth, not a mirror
     for name in ("light", "light_bike", "lens_red", "lens_amber", "lens_green"):
         rough[region(name)] = 170                         # a dark lens: no glare of the sky that reads as lit
     for name in [n for n in CELLS if n.startswith(("route", "finger"))]:
@@ -270,7 +295,17 @@ def metal(im):
     Image.fromarray(metal_.astype(np.uint8)).save(OUT.replace(".png", "_m.png"))
 
 
-def main():
+def main(argv=None):
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--offline", action="store_true",
+                    help="no Commons fetches: a sign not in the cache keeps its cell of the atlas there now")
+    ap.add_argument("--only", default="", help="cell names (comma-separated, wildcards) to draw anew, the rest kept")
+    a = ap.parse_args(argv)
+    # the atlas as it is: a Commons sign that cannot be had keeps its cell from it (it went grey)
+    prev = Image.open(OUT).convert("RGB") if os.path.exists(OUT) else None
+    if prev is not None and prev.size != (GRID[0] * C, GRID[1] * C):
+        prev = None
     im = Image.new("RGB", (GRID[0] * C, GRID[1] * C), (128, 128, 128))
     d = ImageDraw.Draw(im)
     # B6: give way, a triangle point down, red border
@@ -308,7 +343,7 @@ def main():
         d.rectangle([x + 70, y + 4, x + C - 70, y + C - 4], outline=(235, 235, 235), width=6)
         # (all three dark: a fixed head read as lit red, amber and green at once, the user 2026-10-22; the heads
         # that switch are the game's, tools/nl_signal_head.py)
-        for j, off in enumerate(((90, 10, 10), (90, 60, 0), (0, 70, 30))):
+        for j, off in enumerate(((40, 13, 11), (40, 30, 10), (10, 32, 22))):
             cy = y + 44 + j * 84
             d.ellipse([x + C / 2 - 34, cy - 34, x + C / 2 + 34, cy + 34], fill=off)
             if bike:
@@ -336,9 +371,11 @@ def main():
     x, y = cell(d, CELLS["button"])
     d.rectangle([x, y, x + C, y + C], fill=(235, 190, 20))
     d.ellipse([x + 88, y + 88, x + 168, y + 168], fill=BLACK)
-    # lenses: a dark red, amber and green (a fixed head is not lit), a soft shade to the rim
-    for name, (cc, rim) in {"lens_red": ((95, 20, 14), (60, 8, 5)), "lens_amber": ((95, 62, 10), (60, 40, 5)),
-                            "lens_green": ((10, 70, 40), (5, 40, 25))}.items():
+    # lenses: a fixed head's are not lit: smoked glass, all but black with a trace of its colour, a soft shade to the
+    # rim (red, amber and green at 37 % read as lit all at once on the cyclists' head under the switchable one, the
+    # user 2026-10-22)
+    for name, (cc, rim) in {"lens_red": ((40, 13, 11), (22, 8, 7)), "lens_amber": ((40, 30, 10), (22, 17, 7)),
+                            "lens_green": ((10, 32, 22), (7, 18, 13))}.items():
         x, y = cell(d, CELLS[name])
         d.rectangle([x, y, x + C, y + C], fill=rim)
         for i in range(40):
@@ -348,17 +385,33 @@ def main():
             d.ellipse([x + C / 2 - r, y + C / 2 - r, x + C / 2 + r, y + C / 2 + r], fill=col)
     x, y = cell(d, CELLS["white"])
     d.rectangle([x, y, x + C, y + C], fill=(236, 236, 232))
+    for n in SPEEDS:
+        speed_limit(d, *cell(d, CELLS[f"A1_{n}"]), n)
     for name, title in COMMONS.items():
-        img = commons(title)
+        img = commons(title, fetch=not a.offline)
+        x, y = cell(d, CELLS[name])
         if img is not None:
-            x, y = cell(d, CELLS[name])
             back = Image.new("RGB", (C, C), (150, 152, 150))
             img.thumbnail((C - 8, C - 8))
             back.paste(img, ((C - img.width) // 2, (C - img.height) // 2), img)
             im.paste(back, (x, y))
+        elif prev is not None:
+            im.paste(prev.crop((x, y, x + C, y + C)), (x, y))
     for name, (size, lines) in ROUTE.items():
         im.paste(route_sign(size, lines, SPAN.get(name, 1)), cell(d, CELLS[name]))
     metal(im)
+    if a.only and prev is not None:
+        # only these cells drawn anew, the rest as the atlas has them (the route signs drawn on another PC came out
+        # in another face: 2026-10-22, the lenses and the A1 numbers redrawn alone)
+        import fnmatch
+        pats = [p.strip() for p in a.only.split(",") if p.strip()]
+        out = prev.copy()
+        for name in CELLS:
+            if any(fnmatch.fnmatchcase(name, p) for p in pats):
+                x, y = cell(d, CELLS[name])
+                sp = SPAN.get(name, 1) * C
+                out.paste(im.crop((x, y, x + sp, y + sp)), (x, y))
+        im = out
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     im.save(OUT)
     print(OUT)
