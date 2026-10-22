@@ -18,6 +18,7 @@ import logging
 import math
 import os
 import threading
+import time
 
 import numpy as np
 
@@ -253,10 +254,42 @@ class Kunstwerk:
         return out
 
 
+RELOAD_ENV = "BNE_KUNSTWERK_RELOAD"     # set (1): a kunstwerk file written anew is read again (tools/dashboard)
+RELOAD_EVERY_S = 1.0
+_stamp, _checked = None, 0.0
+
+
+def _files_stamp():
+    return tuple((p, os.stat(p).st_mtime_ns) for p in sorted(glob.glob(os.path.join(DIR, "*.kunstwerk.json"))))
+
+
+def _reload_due():
+    """With RELOAD_ENV set: has a kunstwerk file changed since they were read (checked once a RELOAD_EVERY_S)? A file
+    still being written (not JSON yet) keeps the old ones until it is whole."""
+    global _stamp, _checked
+    if not os.environ.get(RELOAD_ENV) or _all is None or time.monotonic() - _checked < RELOAD_EVERY_S:
+        return False
+    _checked = time.monotonic()
+    try:
+        st = _files_stamp()
+        if st == _stamp:
+            return False
+        for p, _ in st:
+            with open(p, encoding="utf-8") as f:
+                json.load(f)
+    except (OSError, ValueError):
+        return False
+    log.info("kunstwerken changed on disk: read again")
+    return True
+
+
 def all_kunstwerken():
-    global _all
+    global _all, _stamp
     with _lock:
+        if _reload_due():
+            _all = None
         if _all is None:
+            _stamp = _files_stamp() if os.environ.get(RELOAD_ENV) else None
             _all = []
             for path in sorted(glob.glob(os.path.join(DIR, "*.kunstwerk.json"))):
                 try:
