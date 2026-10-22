@@ -55,4 +55,26 @@ T.check(math.abs(N.boxMoved({ -708, -452, 196, 452 }, { -1092, -452, -188, 452 }
   'the block moved 384 m: measured between the boxes\' centres')
 T.check(N.boxMoved(nil, { 0, 0, 1, 1 }) == 0 and N.boxMoved({}, { 0, 0, 1, 1 }) == 0, 'no box yet: not moved')
 T.check(384 >= N.RECLIP_M and 128 < N.RECLIP_M, 'a 384 m move re-clips the graph, one step of 128 m does not')
+
+-- an approach's heads: its own and a kunstwerk's more (a[13]: the repeater, the cyclists'), all on its one instance
+do
+  local made, objs = {}, {}
+  scenetree = { findObjectById = function(id) return objs[id] end }
+  quat = function() return {} end
+  MatrixF = function() return { setFromEuler = function() end, setPosition = function() end } end
+  local inst = { name = 'bne_j_1', createSignalObject = function(_, shape, pos)
+    local o = { shape = shape, pos = pos, id = #made + 1, setTransform = function() end, delete = function() end,
+                getID = function(self) return self.id end }
+    made[#made + 1] = o
+    objs[o.id] = o
+    return o
+  end }
+  local a = { 'c1', 0, 0, 0, 1, 0, 0, 5, 6, 4.2, 90, '/k.cdae', { { 7, 8, 4.2, 90, '/k.cdae' }, { 9, 1, 2, 90 } } }
+  N.makeHead(inst, a)
+  T.check(#made == 3 and made[1].pos.x == 5 and made[2].pos.x == 7 and made[3].pos.x == 9,
+    'three heads: its own and its two more')
+  T.check(made[2].shape == '/k.cdae' and made[3].shape == N.SIGNAL_SHAPE, 'each its shape (the stock one if none)')
+  N.makeHead(inst, a)
+  T.check(#made == 3, 'made again: the heads already standing are kept')
+end
 T.done('test_navgraph')

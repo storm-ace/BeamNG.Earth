@@ -330,11 +330,12 @@ def navgraph(aid, lat, lon, zoom, x, y, out_dir, vfs_dir, serial, left_hand, mph
     except Exception as e:          # no decks: the graph follows the ground under bridges
         log.debug("navgraph decks: %s: %s", type(e).__name__, e)
     urban = _s.surface.urban if _s.surface is not None else None
+    mapped = mapped_controls(_s.md, frame, (x - w, y - w, x + w, y + w))
     graph = navgraphmod.build(frame, feats, elev, (x, y), urban, decks=decks, widths=_s.widths, left_hand=left_hand,
-                              mph=mph, mapped=mapped_controls(_s.md, frame, (x - w, y - w, x + w, y + w)))
+                              mph=mph, mapped=mapped)
     if getattr(_s, "bgt", None) is not None:    # (--nl-bgt: the kunstwerken stand in the road tiles, their signals too)
         import kunstwerken as kwmod
-        kwmod.hide_heads(frame, graph["signals"])
+        kwmod.hide_heads(frame, graph["signals"], graph, mapped)
     graph["rules"] = rules
     path = navgraphmod.write(out_dir, vfs_dir, aid, serial, graph)
     return path, len(graph["nodes"]), len(graph["edges"])

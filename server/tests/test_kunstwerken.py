@@ -131,6 +131,66 @@ class FootprintTest(unittest.TestCase):
         self.assertAlmostEqual(float(np.sin(yaw)), -1.0, places=1)
 
 
+    def enu(self, x, y):
+        e, n, _ = self.frame.geodetic_to_enu(*self.ll([x], [y]), 0.0)
+        return [float(e[0]), float(n[0])]
+
+    def test_head_first_primary_and_repeater_not_one_behind(self):
+        """Each head goes to the approach it stands at: the primary and the repeater both show it (one instance, its
+        extra heads in a[12]); a head 11 m back up the approach's own road is not its primary (the Droogleever's
+        Westzeedijk approach took one 21 m back, its own head unused, 2026-10-22)."""
+        self.k.signals = [(np.array([13.0, 1.0, 4.2]), np.array([1.0, 0.0])),      # 11 m before the stop point
+                          (np.array([-3.0, -2.0, 4.2]), np.array([1.0, 0.0])),     # the primary, on the right
+                          (np.array([-3.0, 3.0, 4.2]), np.array([1.0, 0.0]))]      # the repeater, on the left
+        stop = self.enu(2.0, 0.0)
+        a = ["c1"] + stop + [0.0, -1.0, 0.0, 0, None, None, None, None]
+        kunstwerken.hide_heads(self.frame, [{"j": "n1", "kind": "signal", "app": [a]}])
+        prim, rep = self.enu(-3.0, -2.0), self.enu(-3.0, 3.0)
+        self.assertAlmostEqual(a[7], prim[0], places=1)
+        self.assertAlmostEqual(a[8], prim[1], places=1)
+        self.assertEqual(a[11], kunstwerken.HEAD_SHAPE)
+        got = [(round(e[0], 1), round(e[1], 1)) for e in a[12]]
+        self.assertIn((round(rep[0], 1), round(rep[1], 1)), got, "the repeater shows the same light")
+        for e in a[12]:
+            self.assertEqual(e[4], kunstwerken.HEAD_SHAPE)
+
+    def test_head_on_a_road_without_a_signalled_approach(self):
+        """A head looking at a graph edge with a mapped signal on that road and no signalled approach gets one made on
+        that edge (Overture's graph has no junction where the Droogleever's oval has its lights); a mapped signal off
+        the road (a cycle path's) makes none."""
+        from types import SimpleNamespace
+        self.k.signals = [(np.array([0.0, 5.0, 4.2]), np.array([0.0, -1.0]))]      # looks south: at northbound cars
+        h = self.enu(0.0, 5.0)
+        graph = {"nodes": {"n1": [h[0] + 2.0, h[1] - 30.0, 1.0, 3.0], "n2": [h[0] + 2.0, h[1] + 30.0, 1.0, 3.0]},
+                 "edges": [["n1", "n2", 1, 1, 0, 13.9, 1.0, 3.0]]}
+        sig = []
+        kunstwerken.hide_heads(self.frame, sig, graph, SimpleNamespace(pts={"signal": np.array([[h[0] + 9.0,
+                                                                                                h[1]]])}))
+        self.assertEqual(sig, [], "a mapped signal 7 m off the road: a cycle path's, no stop for the cars")
+        kunstwerken.hide_heads(self.frame, sig, graph, SimpleNamespace(pts={"signal": np.array([[h[0] + 2.0,
+                                                                                                h[1] + 1.0]])}))
+        self.assertEqual(len(sig), 1)
+        self.assertEqual(sig[0]["j"], "n2")
+        a = sig[0]["app"][0]
+        self.assertEqual(a[0], "n1")
+        self.assertAlmostEqual(a[4], 0.0, places=3)
+        self.assertAlmostEqual(a[5], 1.0, places=3)
+        self.assertLess(a[2], h[1], "its stop point before the head")
+        self.assertGreater(a[1], h[0] + 2.0, "... on the right half of the road")
+        self.assertAlmostEqual(a[7], h[0], places=1)
+        self.assertEqual(a[11], kunstwerken.HEAD_SHAPE)
+
+    def test_cyclists_head_shows_the_parallel_approach(self):
+        """A head for no car road (a cycle path's light) shows the light of the approach beside it along its axis."""
+        self.k.signals = [(np.array([-3.0, -6.0, 4.2]), np.array([1.0, 0.0]))]
+        stop = self.enu(2.0, 0.0)
+        a = ["c1"] + stop + [0.0, -1.0, 0.0, 0, None, None, None, None]
+        kunstwerken.hide_heads(self.frame, [{"j": "n1", "kind": "signal", "app": [a]}])
+        hd = self.enu(-3.0, -6.0)
+        self.assertAlmostEqual(a[7], hd[0], places=1)
+        self.assertAlmostEqual(a[8], hd[1], places=1)
+
+
 class BareTest(unittest.TestCase):
     """The ground under a kunstwerk's rails is bare: the game's ground cover grew through them (in game 2026-10-22)."""
 

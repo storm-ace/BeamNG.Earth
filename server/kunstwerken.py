@@ -341,42 +341,191 @@ def keep_out(frame, xy, kws=None):
 
 
 HEAD_SHAPE = "/levels/beamng_earth/art/shapes/beamngEarth/bne_nl_signal.cdae"     # tools/nl_signal_head.py
-HEAD_REACH_M = 30.0         # m from an approach's stop point a kunstwerk's head for it may stand
-HEAD_FACING = 0.6           # ... looking at its traffic within ~53 degrees
+HEAD_FACING = 0.6           # cos: a head looks at its traffic within ~53 degrees
+# m: where along an approach (from its stop point, along its traffic) its kunstwerk heads may stand: a little before it
+# (the graph's stop point is its junction's widest arm plus 2 m, the painted line can lie a few metres farther out) to
+# the far side of a wide junction. Before, any head within 30 m of the stop point would do, behind it too: the
+# Droogleever's Westzeedijk approach took a head 21 m back up its own road (2026-10-22)
+HEAD_BEHIND_M, HEAD_AHEAD_M = 8.0, 30.0
+HEAD_ACROSS_M = 12.0        # m a head stands at most beside its approach's line (a median, a kerb, an arm's mast)
+EDGE_ACROSS_M = 10.0        # m a head stands at most beside a graph edge it is made an approach on
+HEAD_UP_M = (0.5, 8.0)      # m a head stands over the road it shows (not the trench's lanes under a deck's street)
+MAPPED_ON_ROAD_M = 3.5      # m: a mapped signal point this near an edge's line is on that road (not a cycle path's)
+PAST_LINE_M = 1.0           # m a head stands past its stop line (a Dutch primary: just after it, tools/kunstwerk_placement)
+JOIN_M = 60.0               # m from a signalled junction's node an approach made for a head joins its phases
+PARALLEL = 0.5              # cos: an approach this near a head's axis shows its light (the cyclists' beside it)
+ATTACH_M = 50.0             # m from a head that approach's stop point may lie (the oval's cycle crossings: 43 m)
+LAST_FACING = 0.3           # cos: else the nearest approach whose traffic comes this much its way
 
 
-def hide_heads(frame, signals):
-    """navgraph's signals in a kunstwerk's footprint (their stop points): each approach's switchable head is the
-    kunstwerk's own head that looks at its traffic nearest its stop point (its pole carries no head of its own: the
-    game puts HEAD_SHAPE there and switches it, navgraph.lua), else none (the stock boom stood in its lanes,
-    2026-10-22); the phases hold the AI either way. Its lights stood dead before: their heads were part of its mesh."""
-    spots = [(i, j) for i, s in enumerate(signals) for j, a in enumerate(s["app"])]
-    if not spots or not all_kunstwerken():
+def _yaw(fx, fy):
+    # (navgraph.lua turns the head by -yaw: the yaw that takes its local +x to (fy, -fx) faces its +y along f)
+    return round(math.degrees(math.atan2(-fx, fy)) % 360.0, 1)
+
+
+def _head_rec(h):
+    x, y, z, fx, fy = h
+    return [round(x, 2), round(y, 2), round(z, 2), _yaw(fx, fy), HEAD_SHAPE]
+
+
+def _give(a, h):
+    """Head h shows approach a: its first head in a[7:12], the others in a[12] (navgraph.lua: one signal instance, all
+    its heads switched together)."""
+    if a[7] is None:
+        a[7:] = _head_rec(h)
+        return
+    if len(a) < 13:
+        a.append([])
+    a[12].append(_head_rec(h))
+
+
+def _edge_for(h, graph, sig_pts):
+    """The graph's edge whose traffic head h looks at (its direction within HEAD_FACING, the head beside it within
+    EDGE_ACROSS_M and over it by HEAD_UP_M) where a mapped signal stands on that road (MAPPED_ON_ROAD_M off its line,
+    HEAD_AHEAD_M along it from the head: not a cycle path's light beside it): (in node, out node, travel unit, stop
+    point, its height) or None."""
+    nodes = graph.get("nodes") or {}
+    if not len(sig_pts):
+        return None
+    x, y, z, fx, fy = h
+    best = None
+    for e in graph.get("edges") or ():
+        if e[0] not in nodes or e[1] not in nodes:
+            continue
+        for a_, b_ in ((e[0], e[1]),) if e[2] else ((e[0], e[1]), (e[1], e[0])):
+            A, B = np.asarray(nodes[a_][:3], np.float64), np.asarray(nodes[b_][:3], np.float64)
+            d = B[:2] - A[:2]
+            L = float(np.hypot(*d))
+            if L < 1.0:
+                continue
+            t = d / L
+            if -(fx * t[0] + fy * t[1]) < HEAD_FACING:
+                continue
+            s = float((np.array([x, y]) - A[:2]) @ t)
+            if not -PAST_LINE_M <= s <= L + PAST_LINE_M:
+                continue
+            across = abs(float(t[0] * (y - A[1]) - t[1] * (x - A[0])))
+            if across > EDGE_ACROSS_M:
+                continue
+            ez = float(A[2] + (B[2] - A[2]) * min(max(s / L, 0.0), 1.0))
+            if not HEAD_UP_M[0] <= z - ez <= HEAD_UP_M[1]:
+                continue
+            q = sig_pts - A[:2]
+            on = (np.abs(t[0] * q[:, 1] - t[1] * q[:, 0]) <= MAPPED_ON_ROAD_M) & (np.abs(q @ t - s) <= HEAD_AHEAD_M)
+            if not on.any():
+                continue
+            if best is None or across < best[0]:
+                right = np.array([t[1], -t[0]])
+                half = min(max(float(e[7]) / 2, 0.8), 2.5) if len(e) > 7 else 1.5
+                stop = A[:2] + t * max(s - PAST_LINE_M, 0.0) + right * half
+                best = (across, (a_, b_, t, stop, ez))
+    return None if best is None else best[1]
+
+
+def hide_heads(frame, signals, graph=None, mapped=None):
+    """navgraph's signals in a kunstwerk's footprint (their stop points) get the kunstwerk's own heads instead of the
+    stock boom (its poles carry no head of their own: the game puts HEAD_SHAPE there and switches it, navgraph.lua);
+    an approach none of its heads shows gets none (the stock boom stood in its lanes, 2026-10-22). The phases hold the
+    AI either way. Its lights stood dead before: their heads were part of its mesh.
+
+    Head first, each to the approach it belongs to: the one whose traffic it looks at (HEAD_FACING), its stop point
+    HEAD_BEHIND_M before to HEAD_AHEAD_M past the head along that traffic and HEAD_ACROSS_M beside it, the nearest
+    such; the primary and its repeater both (one instance switches them all: a[12]). With the graph (nodes, edges) and
+    the mapped controls (furniture.Mapped): a head on a road the graph has no signalled approach on (a signal halfway
+    round the Droogleever's oval: Overture's graph has no junction there) gets an approach made on the edge it looks
+    at where a mapped signal stands on that road, in the phases of the signalled junction within JOIN_M (else its own);
+    a head for no car road (a cycle path's) shows the light of the approach nearest it along its axis (PARALLEL,
+    ATTACH_M): its cyclists go with that traffic. The Droogleever's 18 heads: before, approach first, 5 had one (two of
+    them for the wrong approach, 18-21 m back up its road) and the rest of their poles stood headless (2026-10-22)."""
+    kws = all_kunstwerken()
+    if not kws:
         return signals
-    hit = keep_out(frame, [signals[i]["app"][j][1:3] for i, j in spots])
-    heads = [h for k in all_kunstwerken() for h in k.heads(frame)]
-    used = set()
-    for (i, j), h in zip(spots, hit):
-        if not h:
-            continue
-        a = signals[i]["app"][j]
-        q, inc = np.asarray(a[1:3], np.float64), np.asarray(a[4:6], np.float64)
+    heads = [h for k in kws for h in k.heads(frame)]
+    spots = [(i, j) for i, s in enumerate(signals) for j, a in enumerate(s["app"])]
+    hit = keep_out(frame, [signals[i]["app"][j][1:3] for i, j in spots]) if spots else []
+    ours = [signals[i]["app"][j] for (i, j), h in zip(spots, hit) if h]
+    for a in ours:
+        a[7:] = [None] * 4
+    if not heads:
+        return signals
+    n_app = n_made = n_side = 0
+    left = []
+    for h in heads:
+        x, y, z, fx, fy = h
         best = None
-        for n, (x, y, z, fx, fy) in enumerate(heads):
-            d = float(np.hypot(x - q[0], y - q[1]))
-            if -(fx * inc[0] + fy * inc[1]) >= HEAD_FACING and d <= HEAD_REACH_M:
-                key = (n in used, d)            # (a head not yet given to another approach first)
-                if best is None or key < best[0]:
-                    best = (key, n)
+        for a in ours:
+            inc = np.asarray(a[4:6], np.float64)
+            if -(fx * inc[0] + fy * inc[1]) < HEAD_FACING:
+                continue
+            q = np.array([x - a[1], y - a[2]])
+            along, across = float(q @ inc), abs(float(inc[0] * q[1] - inc[1] * q[0]))
+            if -HEAD_BEHIND_M <= along <= HEAD_AHEAD_M and across <= HEAD_ACROSS_M:
+                score = across + 0.5 * abs(along)
+                if best is None or score < best[0]:
+                    best = (score, a)
         if best is None:
-            a[7:11] = [None] * 4
+            left.append(h)
             continue
-        n = best[1]
-        used.add(n)
-        x, y, z, fx, fy = heads[n]
-        # (navgraph.lua turns the head by -yaw: the yaw that takes its local +x to (fy, -fx) faces its +y along f)
-        a[7:11] = [round(x, 2), round(y, 2), round(z, 2), round(math.degrees(math.atan2(-fx, fy)) % 360.0, 1)]
-        a[11:] = [HEAD_SHAPE]
+        _give(best[1], h)
+        n_app += 1
+    if graph is not None and left:
+        import furniture
+        nodes = graph.get("nodes") or {}
+        pts = getattr(mapped, "pts", {}).get(furniture.G_SIGNAL) if mapped is not None else None
+        pts = np.zeros((0, 2)) if pts is None else np.asarray(pts, np.float64).reshape(-1, 2)
+        rest = []
+        for h in left:
+            got = _edge_for(h, graph, pts)
+            if got is None:
+                rest.append(h)
+                continue
+            a_, b_, t, stop, ez = got
+            # an approach on that road already (the graph's stop point a little inside the junction, the painted line
+            # farther out where the head stands): that one's head, not a second stop behind it
+            same = [a for a in ours if float(np.asarray(a[4:6], np.float64) @ t) > 0.8
+                    and abs(float(t[0] * (a[2] - stop[1]) - t[1] * (a[1] - stop[0]))) < 3.0
+                    and abs(float(t @ np.array([a[1] - stop[0], a[2] - stop[1]]))) < HEAD_AHEAD_M]
+            if same:
+                _give(min(same, key=lambda a: math.hypot(a[1] - stop[0], a[2] - stop[1])), h)
+                n_app += 1
+                continue
+
+            def far(s):
+                return math.hypot(nodes[s["j"]][0] - stop[0], nodes[s["j"]][1] - stop[1])
+            rec = min((s for s in signals if s.get("kind") == "signal" and s["j"] in nodes), key=far, default=None)
+            if rec is None or far(rec) > JOIN_M:
+                rec = {"j": b_, "kind": "signal", "app": []}
+                signals.append(rec)
+            axis = next((np.asarray(a[4:6], np.float64) for a in rec["app"] if a[6] == 0), t)
+            a = [a_, round(float(stop[0]), 2), round(float(stop[1]), 2), round(ez, 2), round(float(t[0]), 4),
+                 round(float(t[1]), 4), 0 if abs(float(t @ axis)) > 0.7 else 1, None, None, None, None]
+            _give(a, h)
+            rec["app"].append(a)
+            ours.append(a)
+            n_made += 1
+        left = rest
+    rest = []
+    for h in left:
+        x, y, z, fx, fy = h
+        best = None
+        for a in ours:
+            inc = np.asarray(a[4:6], np.float64)
+            c = -(fx * inc[0] + fy * inc[1])            # (1: it looks at that traffic, -1: at the other way's)
+            d = math.hypot(x - a[1], y - a[2])
+            # the same way first, then the other way's (one axis, one phase), at last the nearest whose traffic comes
+            # its way at all (a cycle crossing at an angle: the oval's east side, 2026-10-22)
+            tier = 0 if c >= PARALLEL else 1 if c <= -PARALLEL else 2 if c >= LAST_FACING else None
+            if tier is not None and d <= ATTACH_M:
+                key = (tier, d)
+                if best is None or key < best[0]:
+                    best = (key, a)
+        if best is None:
+            rest.append(h)
+            continue
+        _give(best[1], h)
+        n_side += 1
+    log.info("kunstwerk heads: %d of %d on the graph's signalled approaches, %d on approaches made for them, %d "
+             "beside a parallel one (cyclists), %d on none", n_app, len(heads), n_made, n_side, len(rest))
     return signals
 
 

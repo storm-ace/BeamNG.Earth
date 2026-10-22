@@ -160,25 +160,38 @@ end
 
 -- A head for instance inst at a's prop transform: the one already standing there is kept (it is linked by
 -- the instance's name, which stays the same: setupSignals finds it again), so a new graph costs only the new ones.
-local function makeHead(inst, a)
-  if not a[8] or not inst.createSignalObject then return end
-  seenHeads[inst.name] = true
-  local h = heads[inst.name]
-  if h and math.abs(h.x - a[8]) < 0.05 and math.abs(h.y - a[9]) < 0.05 and scenetree.findObjectById(h.id) then return end
+local function placeHead(inst, key, x, y, z, yaw, shape)
+  seenHeads[key] = true
+  local h = heads[key]
+  if h and math.abs(h.x - x) < 0.05 and math.abs(h.y - y) < 0.05 and scenetree.findObjectById(h.id) then return end
   if h then
     local old = scenetree.findObjectById(h.id)
     if old then old:delete() end
   end
-  -- a[12]: the head's own shape where the server names one (a kunstwerk's Dutch head on its pole, kunstwerken.py)
-  local shape = type(a[12]) == 'string' and a[12] or M.SIGNAL_SHAPE
-  local o = inst:createSignalObject(shape, vec3(a[8], a[9], a[10]), quat(0, 0, 0, 1))
+  local o = inst:createSignalObject(shape, vec3(x, y, z), quat(0, 0, 0, 1))
   if not o then return end
   local m = MatrixF(true)
-  m:setFromEuler(vec3(0, 0, -math.rad(a[11] or 0)))     -- as trees.lua turns the static boom (negated: clockwise)
-  m:setPosition(vec3(a[8], a[9], a[10]))
+  m:setFromEuler(vec3(0, 0, -math.rad(yaw or 0)))       -- as trees.lua turns the static boom (negated: clockwise)
+  m:setPosition(vec3(x, y, z))
   o:setTransform(m)
-  heads[inst.name] = { id = o:getID(), x = a[8], y = a[9] }
+  heads[key] = { id = o:getID(), x = x, y = y }
 end
+
+local function makeHead(inst, a)
+  if not inst.createSignalObject then return end
+  -- a[12]: the head's own shape where the server names one (a kunstwerk's Dutch head on its pole, kunstwerken.py)
+  if a[8] then placeHead(inst, inst.name, a[8], a[9], a[10], a[11], type(a[12]) == 'string' and a[12] or M.SIGNAL_SHAPE) end
+  -- a[13]: more heads that show this approach's light ({x, y, z, yaw, shape}): a kunstwerk's repeater on the median
+  -- and the heads on its poles for the cyclists beside it (kunstwerken.hide_heads); one instance switches them all
+  if type(a[13]) == 'table' then
+    for k, e in ipairs(a[13]) do
+      if type(e) == 'table' and e[1] then
+        placeHead(inst, inst.name .. '#' .. k, e[1], e[2], e[3], e[4], type(e[5]) == 'string' and e[5] or M.SIGNAL_SHAPE)
+      end
+    end
+  end
+end
+M.makeHead = makeHead       -- (tests)
 
 local function signalData(nodes)
   local ts = core_trafficSignals
