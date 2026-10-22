@@ -50,6 +50,67 @@ class FillTest(unittest.TestCase):
         np.testing.assert_allclose(ahn.fill_low(a)[1, 1:3], -1.0)
 
 
+def grid_fill(a, rounds=ahn.FILL_ROUNDS, smooth=ahn.SMOOTH_ROUNDS):
+    """fill as it was, round by round over the whole grid (the reference: fill looks at the last ring's neighbours
+    only, for the same result)."""
+    a = np.asarray(a, np.float32)
+    hole = ~np.isfinite(a)
+    if not hole.any() or hole.all():
+        return a
+    out = np.where(hole, 0.0, a).astype(np.float32)
+    known = ~hole
+    for _ in range(rounds):
+        todo = ~known
+        p = np.pad(out, 1, mode="edge")
+        v = np.pad(known, 1, mode="edge").astype(np.float32)
+        s = (p[:-2, 1:-1] * v[:-2, 1:-1] + p[2:, 1:-1] * v[2:, 1:-1] + p[1:-1, :-2] * v[1:-1, :-2]
+             + p[1:-1, 2:] * v[1:-1, 2:])
+        n = v[:-2, 1:-1] + v[2:, 1:-1] + v[1:-1, :-2] + v[1:-1, 2:]
+        got = todo & (n > 0)
+        if not got.any():
+            break
+        out[got] = s[got] / n[got]
+        known |= got
+    filled = hole & known
+    for _ in range(smooth):
+        p = np.pad(out, 1, mode="edge")
+        out[filled] = ((p[:-2, 1:-1] + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:]) / 4.0)[filled]
+    out[~known] = np.nan
+    return out
+
+
+def grid_fill_low(a, rounds=ahn.FILL_ROUNDS):
+    a = np.asarray(a, np.float32)
+    hole = ~np.isfinite(a)
+    if not hole.any() or hole.all():
+        return a
+    out = np.where(hole, np.inf, a).astype(np.float32)
+    for _ in range(rounds):
+        p = np.pad(out, 1, mode="constant", constant_values=np.inf)
+        m = np.minimum.reduce([p[:-2, 1:-1], p[2:, 1:-1], p[1:-1, :-2], p[1:-1, 2:]])
+        lower = hole & (m < out)
+        if not lower.any():
+            break
+        out[lower] = m[lower]
+    out[~np.isfinite(out)] = np.nan
+    return out
+
+
+class FrontierTest(unittest.TestCase):
+    def test_same_as_round_by_round_over_the_grid(self):
+        """Random holes (large ones, at the edges, a few rounds only so some stay NaN): bit for bit the grid's."""
+        rng = np.random.default_rng(7)
+        for k in range(8):
+            a = rng.normal(0, 3, (40 + 9 * k, 35 + 5 * k)).astype(np.float32)
+            a[rng.random(a.shape) < 0.2 + 0.08 * k] = np.nan
+            a[3:25, 0:20] = np.nan
+            for rounds in (ahn.FILL_ROUNDS, 4):
+                for got, want in ((ahn.fill(a, rounds), grid_fill(a, rounds)),
+                                  (ahn.fill_low(a, rounds), grid_fill_low(a, rounds)),
+                                  (ahn.fill_low(-a, rounds), grid_fill_low(-a, rounds))):
+                    np.testing.assert_array_equal(np.nan_to_num(got, nan=-1e9), np.nan_to_num(want, nan=-1e9))
+
+
 class AhnDemTest(unittest.TestCase):
     class Base:
         def sample(self, lat, lon, zoom, progress=None):

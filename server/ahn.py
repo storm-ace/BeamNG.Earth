@@ -24,6 +24,7 @@ import math
 import os
 import threading
 from collections import OrderedDict
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import numpy as np
 
@@ -38,6 +39,7 @@ MARGIN_M = 50.0             # m fetched round it for the fill
 FILL_ROUNDS = 400           # onion rings at most (200 m from a rim)
 SMOOTH_ROUNDS = 60          # then the filled cells smoothed (Jacobi) this often
 MEM_TILES = 48
+FETCH_WORKERS = 6           # tiles fetched and filled at once (Ahn.sample)
 MIN_ZOOM = 14               # AhnDem: coarser samples (the far tiles) keep the base DEM
 DECK_RISE_M = 2.0           # a hole whose surface is this far over the filled ground is a deck (deck_top)
 DECK_AT_GRADE_M = 1.0          # ... and within this of the higher side round it (not a roof)
@@ -80,6 +82,29 @@ def covers(lat, lon):
     return 3.2 <= lon <= 7.3 and 50.7 <= lat <= 53.6
 
 
+def _around(k, nx, n):
+    """The 4-neighbours of the flat cells k of a grid n cells large, nx wide: (cell, inside) up, down, left, right;
+    a neighbour outside the grid is the cell itself."""
+    c = k % nx
+    return [(np.where(ok, nb, k), ok) for nb, ok in
+            ((k - nx, k >= nx), (k + nx, k < n - nx), (k - 1, c > 0), (k + 1, c < nx - 1))]
+
+
+def _next(changed, nx, n, want, mark):
+    """The cells next to the changed ones (inside the grid) that want (a flat mask) says may change next, in order.
+    mark: a flat all-False scratch mask, left all-False (np.unique took most of the time)."""
+    for q, ok in _around(changed, nx, n):
+        mark[q[ok]] = True
+    nb = np.flatnonzero(mark)
+    mark[nb] = False
+    return nb[want[nb]]
+
+
+# fill / fill_low work ring by ring, and a ring only changes the cells next to the last one: they look at those cells
+# only (flat indices), not at the whole tile every round. The same sums in the same order as round by round over the
+# whole grid, so the same result; a city tile 6 s -> well under 1 s (2026-10-22: a teleport into Rotterdam waited
+# minutes for its AHN tiles, the main process's fill one tile after another)
+
 def fill_low(a, rounds=FILL_ROUNDS):
     """a (2-D, NaN = no data) with its holes filled ring by ring with the lowest of the known 4-neighbours: what lies
     under a deck is the lower of its sides (a trench's floor runs on under the street over it; the mean of its rim,
@@ -88,16 +113,26 @@ def fill_low(a, rounds=FILL_ROUNDS):
     hole = ~np.isfinite(a)
     if not hole.any() or hole.all():
         return a
-    out = np.where(hole, np.inf, a).astype(np.float32)
+    ny, nx = a.shape
+    n = a.size
+    out = np.where(hole, np.inf, a).astype(np.float32).ravel()
+    hf = hole.ravel()
+    mark = np.zeros(n, bool)
+    front = np.flatnonzero(hf)
     for _ in range(rounds):         # (until the lowest of its rim has reached every cell of a hole: ring by ring the
-        p = np.pad(out, 1, mode="constant", constant_values=np.inf)   # street beside the deck came in first)
-        m = np.minimum.reduce([p[:-2, 1:-1], p[2:, 1:-1], p[1:-1, :-2], p[1:-1, 2:]])
-        lower = hole & (m < out)
+        if not len(front):          # street beside the deck came in first)
+            break
+        m = np.full(len(front), np.inf, np.float32)
+        for q, ok in _around(front, nx, n):
+            m = np.minimum(m, np.where(ok, out[q], np.float32(np.inf)))
+        lower = m < out[front]
         if not lower.any():
             break
-        out[lower] = m[lower]
+        ch = front[lower]
+        out[ch] = m[lower]
+        front = _next(ch, nx, n, hf, mark)
     out[~np.isfinite(out)] = np.nan
-    return out
+    return out.reshape(ny, nx)
 
 
 def ground(dtm, dsm, decks=False):
@@ -124,29 +159,35 @@ def fill(a, rounds=FILL_ROUNDS, smooth=SMOOTH_ROUNDS):
     hole = ~np.isfinite(a)
     if not hole.any() or hole.all():
         return a
-    out = np.where(hole, 0.0, a).astype(np.float32)
-    known = ~hole
+    ny, nx = a.shape
+    n = a.size
+    out = np.where(hole, 0.0, a).astype(np.float32).ravel()
+    known = (~hole).ravel()
+    mark = np.zeros(n, bool)
+    front = np.flatnonzero(~known)  # (every hole cell the first round; then those next to the last ring)
     for _ in range(rounds):
-        todo = ~known
-        if not todo.any():
+        if not len(front):
             break
-        p = np.pad(out, 1, mode="edge")
-        v = np.pad(known, 1, mode="edge").astype(np.float32)
-        s = (p[:-2, 1:-1] * v[:-2, 1:-1] + p[2:, 1:-1] * v[2:, 1:-1] + p[1:-1, :-2] * v[1:-1, :-2]
-             + p[1:-1, 2:] * v[1:-1, 2:])
-        n = v[:-2, 1:-1] + v[2:, 1:-1] + v[1:-1, :-2] + v[1:-1, 2:]
-        got = todo & (n > 0)
+        s = np.zeros(len(front), np.float32)
+        cnt = np.zeros(len(front), np.float32)
+        for q, _ok in _around(front, nx, n):     # (outside: the cell itself, unknown: adds nothing)
+            v = known[q].astype(np.float32)
+            s = s + out[q] * v
+            cnt = cnt + v
+        got = cnt > 0
         if not got.any():
             break
-        out[got] = s[got] / n[got]
-        known |= got
-    filled = hole & known
-    for _ in range(smooth):
-        p = np.pad(out, 1, mode="edge")
-        m = (p[:-2, 1:-1] + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:]) / 4.0
-        out[filled] = m[filled]
+        g = front[got]
+        out[g] = s[got] / cnt[got]
+        known[g] = True
+        front = _next(g, nx, n, ~known, mark)
+    filled = np.flatnonzero(hole.ravel() & known)
+    if len(filled):
+        nbs = [q for q, _ok in _around(filled, nx, n)]
+        for _ in range(smooth):
+            out[filled] = (out[nbs[0]] + out[nbs[1]] + out[nbs[2]] + out[nbs[3]]) / 4.0
     out[~known] = np.nan
-    return out
+    return out.reshape(ny, nx)
 
 
 class Ahn:
@@ -155,6 +196,14 @@ class Ahn:
         self.fetcher = fetcher
         self.mem = OrderedDict()
         self.lock = threading.Lock()
+        self.busy = {}              # (i, j) -> the Future of a tile being made (a second asker waits for it)
+        self.pool = None
+
+    def _pool(self):
+        with self.lock:
+            if self.pool is None:
+                self.pool = ThreadPoolExecutor(FETCH_WORKERS, thread_name_prefix="ahn")
+            return self.pool
 
     def _fetch(self, cov, x0, y0, x1, y1):
         """A coverage's grid over the RD box (rows north to south), NaN where it has no data."""
@@ -175,6 +224,24 @@ class Ahn:
             if (i, j) in self.mem:
                 self.mem.move_to_end((i, j))
                 return self.mem[(i, j)]
+            fut = self.busy.get((i, j))
+            mine = fut is None
+            if mine:
+                fut = self.busy[(i, j)] = Future()
+        if not mine:
+            return fut.result()
+        try:
+            got = self._make(i, j)
+        except BaseException as e:
+            fut.set_exception(e)
+            raise
+        finally:
+            with self.lock:
+                self.busy.pop((i, j), None)
+        fut.set_result(got)
+        return got
+
+    def _make(self, i, j):
         path = os.path.join(self.dir, f"{i}_{j}.npz")
         got = None
         try:
@@ -219,7 +286,12 @@ class Ahn:
             x, y = wgs_to_rd(la[ok], lo[ok])
             ti, tj = np.floor(x / TILE_M).astype(np.int64), np.floor(y / TILE_M).astype(np.int64)
             k_ok = np.flatnonzero(ok)
-            for i, j in set(zip(ti.tolist(), tj.tolist())):
+            keys = set(zip(ti.tolist(), tj.tolist()))
+            with self.lock:
+                new = [k for k in keys if k not in self.mem]
+            if len(new) > 1:        # (a teleport's first block wants tens of them: fetched and filled at once)
+                list(self._pool().map(lambda k: self.tile(*k), sorted(new)))
+            for i, j in keys:
                 sel = (ti == i) & (tj == j)
                 t = self.tile(i, j)
                 if t is None:
