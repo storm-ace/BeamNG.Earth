@@ -52,6 +52,7 @@ STREET_SMOOTH_M = 4.0   # m: the streets'
 SUNK_UNDER_M = 1.8      # m under the streets' typical height a place is sunk (a cut)
 LEVEL_SMOOTH_M = 1.0    # m: the levels' rounding
 GRASS_JOIN_M = 3.0      # m over which a verge goes from its street's level to the ground's
+DECK_SMOOTH_M = 1.5     # m: a deck's top's smoothing
 CUT_MEET_M = 0.3        # m: a carriageway joins the cut round it where its floor is this near the cut's streets
 CLEARANCE = 4.5         # m: the least headroom under a deck (the Dutch standard for a new one)
 DIP_GRADE = 0.04        # the steepest the floor dips to it
@@ -304,10 +305,16 @@ class Heights:
     streets along their edges (GRASS_JOIN_M) so a verge meets its kerb. Where the levels meet the columns' sides are
     the walls."""
 
-    def __init__(self, g, plan, trench_ahn):
+    def __init__(self, g, plan, trench_ahn, strips_ahn, decks_bgt=()):
         kind = np.load(os.path.join(g.ref, "ahn.npz"))["kind"]
         h = np.where(kind == 2, g.dsm, g.dtm)
-        ok = (kind != 1) & np.isfinite(h) & (~trench_ahn | (kind == 2))      # a deck's top is a street's
+        # the lidar left out: in the trench (trench_ahn, the walls tool's whole low area) for the streets at grade and
+        # those by a deck (a deck's top is a street's, not the cut's floor beside it); only in the carriageways' own
+        # strips (strips_ahn) for the rest of the cut: its floor between the two carriageways is the lidar's (it stood
+        # 3-5 m up as a walled berm, the user's Street View 2026-10-22: a planted hollow there)
+        ok_hi = (kind != 1) & np.isfinite(h) & (~trench_ahn | (kind == 2))
+        ok = (kind != 1) & np.isfinite(h) & (~strips_ahn | (kind == 2))
+        ok_lo = ok
         h = np.where(ok, h, 0.0)
         H, W = h.shape
         X, Y = np.meshgrid(g.x0 + (np.arange(W) + 0.5) * g.res, g.y1 - (np.arange(H) + 0.5) * g.res)
@@ -323,15 +330,25 @@ class Heights:
         raw = (np.where(ground_ok, g.dtm, 99.0) < typical - SUNK_UNDER_M).astype(float)
         self.sunk, _ = normconv(ground_ok, LEVEL_SMOOTH_M, raw)          # (0..1: the share of ground sunk around)
         sunk = self.sunk > 0.5
-        far, _ = normconv(ok, 12.0)
+        far, _ = normconv(ok_hi, 12.0)
         streets = []
-        for lvl in (sunk, ~sunk):
-            st, den = normconv(ok & paved & lvl, STREET_SMOOTH_M)
-            wide, wden = normconv(ok & paved & lvl, 12.0)
+        for lvl, ok_ in ((sunk, ok_lo), (~sunk, ok_hi)):
+            st, den = normconv(ok_ & paved & lvl, STREET_SMOOTH_M)
+            wide, wden = normconv(ok_ & paved & lvl, 12.0)
             wide = np.where(wden > 1e-3, wide, far)
             w = np.clip(den / 0.2, 0, 1)
             streets.append(st * w + wide * (1 - w))
-        self.street_lo, self.street_hi = streets
+        # on a deck (the BGT's, or a structure the lidar sees) its street is the deck's top as the lidar sees it, out to
+        # its edges (blurred with the cut's floor beside it, it lay up to 2 m under it)
+        on_deck = kind == 2
+        for ring in decks_bgt:
+            on_deck |= Path(ring).contains_points(np.c_[X.ravel(), Y.ravel()]).reshape(H, W)
+        deck, _ = normconv(ok & (kind == 2), DECK_SMOOTH_M)
+        wide, _ = normconv(ok & (kind == 2), 12.0)
+        deck = np.where(np.isfinite(deck) & (gaussian_filter((ok & (kind == 2)).astype(float), DECK_SMOOTH_M / g.res)
+                                             > 0.05), deck, wide)
+        wd = np.clip(1.5 - ndi_edt(~on_deck) * g.res, 0, 1)
+        self.street_lo, self.street_hi = (s_ * (1 - wd) + deck * wd for s_ in streets)
         street = np.where(sunk, self.street_lo, self.street_hi)
         ground, den = normconv(ok, BASE_SMOOTH_M)
         w = np.clip(den / 0.3, 0, 1)
@@ -455,14 +472,15 @@ def main(argv=None):
     for c in cws:
         print(f"{c.name}: width {c.W:.2f} m, lanes {trench_lanes.get(c.name)}, floor {c.floor.min():.2f}..{c.floor.max():.2f}, decks "
               + ", ".join(f"t {d0:.1f}..{d1:.1f}" for d0, d1 in c.decks))
-    # the trench on the AHN's grid (its cells are left out of the streets' heights)
+    # the carriageways' strips and the whole trench on the AHN's grid (Heights: which lidar cells its surfaces leave out)
     H, W = g.dtm.shape
     AX, AY = np.meshgrid(g.x0 + (np.arange(W) + 0.5) * g.res, g.y1 - (np.arange(H) + 0.5) * g.res)
-    trench_ahn = np.load(os.path.join(a.ref, "trench_mask.npy"))
+    strips_ahn = np.zeros(AX.shape, bool)
     for c in cws:
         t, w = c.tw(AX.ravel(), AY.ravel())
-        trench_ahn |= ((t >= c.t0) & (t <= c.t1) & (np.abs(w) <= c.W / 2 + 1.0)).reshape(AX.shape)
-    hts = Heights(g, plan, trench_ahn)
+        strips_ahn |= ((t >= c.t0) & (t <= c.t1) & (np.abs(w) <= c.W / 2 + 1.0)).reshape(AX.shape)
+    trench_ahn = np.load(os.path.join(a.ref, "trench_mask.npy")) | strips_ahn
+    hts = Heights(g, plan, trench_ahn, strips_ahn, decks_bgt)
     # a carriageway's own strip only where the trench is its own: where the ground either side is sunk too (north of
     # the ring the whole road lies in one wide cut) it is a street of the cut like the others
     for c in cws:
@@ -486,7 +504,8 @@ def main(argv=None):
         for d0, d1 in c.decks:
             tt = np.linspace(d0, d1, 12)
             pp = np.concatenate([c.xy(tt, w) for w in (-c.W / 2, 0.0, c.W / 2)])
-            top = float(np.min(hts.at(ROAD, *pp.T)))           # (its lowest: the deck slopes, round 5 mesh check)
+            # (its low side: the deck slopes, round 5 mesh check; not its one lowest point, a corner off the deck)
+            top = float(np.percentile(hts.at(ROAD, *pp.T), 10))
             need = top - DECK_T - CLEARANCE
             under = (c.ts >= d0 - 1) & (c.ts <= d1 + 1)
             dip = max(0.0, float(c.floor[under].max()) - need)

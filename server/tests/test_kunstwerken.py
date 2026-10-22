@@ -152,6 +152,16 @@ class ShippedPaintTest(unittest.TestCase):
                 flat = np.abs(nz) > 1e-6
                 self.assertEqual(int((nz[flat] < 0).sum()), 0, f"{Path(f).name}: {name} faces wound down")
 
+    def test_droogleever_middle_is_a_hollow(self):
+        """Between Droogleever's two trench carriageways the ground lies in the cut (the AHN: -1.2 .. -1.6 m NAP), not
+        on a berm at the streets' height walled in on both sides (+1.3 .. +3.5 m, the user's Street View 2026-10-22)."""
+        import json
+        d = json.load(open(Path(kunstwerken.DIR) / "droogleever.kunstwerk.json"))
+        f = d["floor"]
+        z = np.asarray(f["z"]).reshape(f["ny"], f["nx"])
+        for x, y in ((8, 0), (12, 0), (16, -25), (20, -25)):
+            self.assertLess(float(z[int(y - f["y0"]), int(x - f["x0"])]), 0.0, f"floor at ({x}, {y})")
+
 
 if __name__ == "__main__":
     unittest.main()
