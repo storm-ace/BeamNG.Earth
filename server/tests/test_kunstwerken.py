@@ -131,5 +131,27 @@ class FootprintTest(unittest.TestCase):
         self.assertAlmostEqual(float(np.sin(yaw)), -1.0, places=1)
 
 
+class ShippedPaintTest(unittest.TestCase):
+    """The shipped kunstwerken's road paint faces up: a face wound the other way is culled from above and the paint is
+    not seen (the trench's lane lines were all wound down, its floor bare asphalt in game, the user 2026-10-22)."""
+
+    def test_paint_faces_up(self):
+        import glob
+        import json
+        files = glob.glob(str(Path(kunstwerken.DIR) / "*.kunstwerk.json"))
+        self.assertTrue(files)
+        for f in files:
+            d = json.load(open(f))
+            P, T, M = np.asarray(d["positions"]), np.asarray(d["tris"]), np.asarray(d["tri_material"])
+            for name in ("bne_paint_white", "bne_cycle_red"):
+                if name not in d["materials"]:
+                    continue
+                t = T[M == d["materials"].index(name)]
+                a, b, c = P[t[:, 0]], P[t[:, 1]], P[t[:, 2]]
+                nz = np.cross(b - a, c - a)[:, 2]
+                flat = np.abs(nz) > 1e-6
+                self.assertEqual(int((nz[flat] < 0).sum()), 0, f"{Path(f).name}: {name} faces wound down")
+
+
 if __name__ == "__main__":
     unittest.main()

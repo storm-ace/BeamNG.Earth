@@ -129,6 +129,92 @@ def osm_platforms(ref):
     return out
 
 
+def osm_trench_lanes(ref, cws):
+    """Per carriageway its OSM way's lanes: name -> (travel, lanes), travel +1 where it is driven along +t, lanes from
+    the left as driven, each its bus:lanes value ("designated": a bus lane; one trench's right lane is the bus's,
+    'no|designated', the user 2026-10-22: "1 baan voor auto's, andere voor bus"). The way most of whose nodes lie in
+    the carriageway's strip; none: not in the result."""
+    import xml.etree.ElementTree as ET
+    path = os.path.join(REF_DIR[0], "osm_map.xml") if REF_DIR else None
+    if not path or not os.path.exists(path):
+        return {}
+    sys.path.insert(0, os.path.join(HERE, "..", "server"))
+    import ahn
+    root = ET.parse(path).getroot()
+    nodes = {n.get("id"): n for n in root.findall("node")}
+    o = ref["origin_rd"]
+    best = {}
+    for w in root.findall("way"):
+        tags = {t.get("k"): t.get("v") for t in w.findall("tag")}
+        if not tags.get("highway") or tags.get("oneway") not in ("yes", "1", "-1"):
+            continue
+        pts = []
+        for r_ in (nd.get("ref") for nd in w.findall("nd")):
+            if r_ in nodes:
+                x, y = ahn.wgs_to_rd(float(nodes[r_].get("lat")), float(nodes[r_].get("lon")))
+                pts.append([x - o[0], y - o[1]])
+        if len(pts) < 2:
+            continue
+        p = np.asarray(pts, np.float64)
+        for c in cws:
+            inside = c.inside(*p.T)
+            if inside.sum() < 2 or inside.mean() < 0.5:
+                continue
+            t, _ = c.tw(*p[inside].T)
+            travel = 1.0 if (t[-1] - t[0]) * (1 if tags["oneway"] != "-1" else -1) > 0 else -1.0
+            try:
+                n = int(tags.get("lanes", "1"))
+            except ValueError:
+                n = 1
+            bus = tags.get("bus:lanes", "").split("|")
+            lanes = [bus[k] if len(bus) == n else "yes" for k in range(n)]
+            if inside.sum() > best.get(c.name, (0,))[0]:
+                best[c.name] = (int(inside.sum()), travel, lanes)
+    return {k: (v[1], v[2]) for k, v in best.items()}
+
+
+BUS_TEXT_FIRST_M = 12.0     # m from a carriageway's ends the first BUS stands
+BUS_TEXT_EVERY_M = 45.0     # m between them
+ROAD_TEXT_H, ROAD_TEXT_W, ROAD_TEXT_GAP = 3.0, 0.65, 0.25    # m: a letter's length along the lane, its width, between
+ROAD_TEXT_STROKE = 0.15     # m
+LETTERS = {     # strokes in a 1 x 1 box: x across (+: right as driven), y along (+: ahead)
+    "B": [(0, 0), (0, 1), None, (0, 1), (0.7, 1), (1, 0.88), (1, 0.62), (0.7, 0.5), (0, 0.5), None,
+          (0.7, 0.5), (1, 0.38), (1, 0.12), (0.7, 0), (0, 0)],
+    "U": [(0, 1), (0, 0.15), (0.3, 0), (0.7, 0), (1, 0.15), (1, 1)],
+    "S": [(1, 0.9), (0.75, 1), (0.25, 1), (0, 0.88), (0, 0.62), (0.25, 0.5), (0.75, 0.5), (1, 0.38), (1, 0.12),
+          (0.75, 0), (0.25, 0), (0, 0.1)],
+}
+
+
+def flat_quad(part, q):
+    """A flat quad (4 corners (x, y, z) round it) facing up, whichever way round its corners come."""
+    q = np.asarray(q, np.float64)
+    up = np.cross(q[1] - q[0], q[2] - q[0])[2] > 0
+    part.add(q, [[0, 1, 2], [0, 2, 3]] if up else [[0, 2, 1], [0, 3, 2]], [[0, 0], [1, 0], [1, 1], [0, 1]])
+
+
+def road_text(part, c, t, w, travel, z, text="BUS"):
+    """Text painted in a lane of the carriageway c, its foot at t (w across), read by who drives it (travel along t)."""
+    total = len(text) * ROAD_TEXT_W + (len(text) - 1) * ROAD_TEXT_GAP
+    for i, ch in enumerate(text):
+        x0 = -total / 2 + i * (ROAD_TEXT_W + ROAD_TEXT_GAP)
+        pts = LETTERS[ch]
+        for a, b in zip(pts[:-1], pts[1:]):
+            if a is None or b is None:
+                continue
+            # letter (x right, y ahead) -> (t, w): ahead is travel along t, right as driven is -travel along w
+            A = np.array([t + travel * a[1] * ROAD_TEXT_H, w - travel * (x0 + a[0] * ROAD_TEXT_W)])
+            B = np.array([t + travel * b[1] * ROAD_TEXT_H, w - travel * (x0 + b[0] * ROAD_TEXT_W)])
+            pa, pb = c.xy(A[0], A[1])[0], c.xy(B[0], B[1])[0]
+            d = pb - pa
+            L = np.hypot(*d)
+            if L < 1e-6:
+                continue
+            nn = np.array([-d[1], d[0]]) / L * ROAD_TEXT_STROKE / 2
+            ext = d / L * ROAD_TEXT_STROKE / 2            # (each stroke a little past its ends: the corners closed)
+            flat_quad(part, [(*(pa - ext + nn), z), (*(pa - ext - nn), z), (*(pb + ext - nn), z), (*(pb + ext + nn), z)])
+
+
 REF_DIR = []
 
 
@@ -365,8 +451,9 @@ def main(argv=None):
     decks_bgt = [np.asarray(f["rings"][0]) for f in ref["features"] if f["layer"] == "tunneldeel"]
     cws = [Carriageway(nm, f, frame, max(ta, AREA_T[0] - 1), min(tb, AREA_T[1] + 1), wd, g, decks_bgt)
            for nm, (f, ta, tb, wd) in lines.items()]
+    trench_lanes = osm_trench_lanes(ref, cws)
     for c in cws:
-        print(f"{c.name}: width {c.W:.2f} m, floor {c.floor.min():.2f}..{c.floor.max():.2f}, decks "
+        print(f"{c.name}: width {c.W:.2f} m, lanes {trench_lanes.get(c.name)}, floor {c.floor.min():.2f}..{c.floor.max():.2f}, decks "
               + ", ".join(f"t {d0:.1f}..{d1:.1f}" for d0, d1 in c.decks))
     # the trench on the AHN's grid (its cells are left out of the streets' heights)
     H, W = g.dtm.shape
@@ -626,18 +713,32 @@ def main(argv=None):
                     railing(rails, line[j:e], ztop[j:e])
                 j = e
         # (the decks' parapets: the BGT's walls across them, below)
-        # lane markings: edge lines and the dashed lane line, on the floor
+        # lane markings on the floor: edge lines, the lane lines between OSM's lanes (dashed; solid beside a bus lane),
+        # and BUS in a bus lane
         mk = np.arange(c.t0, c.t1 + 1e-6, 1.0)
-        fz = np.interp(mk, c.ts, c.floor) + 0.02
+        fz = np.interp(mk, c.ts, c.floor) + PAINT_LIFT
         s = np.r_[0, np.cumsum(np.hypot(*np.diff(c.xy(mk, 0), axis=0).T))]
-        for off, dash in ((c.W / 2 - SHOULDER - 0.1, False), (-(c.W / 2 - SHOULDER - 0.1), False), (0.0, True)):
+        travel, lanes = trench_lanes.get(c.name, (1.0, ["yes", "yes"]))
+        inner = c.W - 2 * SHOULDER - 0.2
+        # lane k (from the left as driven) between w = travel * (inner / 2 - k * inner / N) and the next
+        bounds = [travel * (inner / 2 - k * inner / len(lanes)) for k in range(len(lanes) + 1)]
+        lines_ = [(bounds[0], False), (bounds[-1], False)]
+        lines_ += [(bounds[k], "designated" not in (lanes[k - 1], lanes[k])) for k in range(1, len(lanes))]
+        for off, dash in lines_:
             A_, B_ = c.xy(mk, off + 0.075), c.xy(mk, off - 0.075)
             ok = in_area(*c.xy(mk, off).T)
             for j in range(len(mk) - 1):
                 if not (ok[j] and ok[j + 1]) or (dash and (s[j] % 12.0) >= 3.0):
                     continue
-                q = [(*A_[j], fz[j]), (*B_[j], fz[j]), (*B_[j + 1], fz[j + 1]), (*A_[j + 1], fz[j + 1])]
-                marks.add(q, [[0, 2, 1], [0, 3, 2]], [[0, 0], [1, 0], [1, 1], [0, 1]])
+                flat_quad(marks, [(*A_[j], fz[j]), (*B_[j], fz[j]), (*B_[j + 1], fz[j + 1]), (*A_[j + 1], fz[j + 1])])
+        for k, lane in enumerate(lanes):
+            if lane != "designated":
+                continue
+            w_mid = (bounds[k] + bounds[k + 1]) / 2
+            for t_ in np.arange(c.t0 + BUS_TEXT_FIRST_M, c.t1 - BUS_TEXT_FIRST_M, BUS_TEXT_EVERY_M):
+                if any(d0 - 3 <= t_ <= d1 + 3 for d0, d1 in c.decks) or not in_area(*c.xy(t_, w_mid).T)[0]:
+                    continue
+                road_text(marks, c, t_, w_mid, travel, float(np.interp(t_, c.ts, c.floor)) + PAINT_LIFT)
     # the BGT's walls beyond the trench's own (the wing walls by the decks, the park's retaining walls): each wall's
     # outline's middle line, a dark wall PARAPET_T thick, its top PARAPET_UP over the higher ground beside it (Street
     # View A200, B130: one long dark wall between the tram's grass and the sunk park); a railing on it where a path runs
