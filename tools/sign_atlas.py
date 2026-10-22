@@ -14,7 +14,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "..", "mod", "beamng_earth", "levels", "beamng_earth", "art", "shapes", "beamngEarth",
                    "bne_signs3.png")
 C = 256
-GRID = (4, 16)           # cells across, down (the route signs take 2 x 2 cells each: SPAN)
+GRID = (4, 24)           # cells across, down (the route signs take 2 x 2 cells each: SPAN)
 CELLS = {"B6": 0, "G11": 1, "D2": 2, "L2": 3, "light": 4, "back": 5, "stripes": 6, "route": 7, "black": 8,
          "light_bike": 9, "button": 10, "grey": 11, "lens_red": 12, "lens_amber": 13, "lens_green": 14, "white": 15,
          "route_havens": 16, "route_centrum": 18, "route_a13": 24,
@@ -47,9 +47,16 @@ ROUTE = {
     "route_small_a20": ((1.2, 0.5), [("text", "Ring A20")]),
     "route_small_s114": ((1.2, 0.5), [("text", "S 114")]),
 }
-COMMONS = {"B6": "Nederlands verkeersbord B6.svg", "G11": "Nederlands verkeersbord G11.svg",
-           "D2": "Nederlands verkeersbord D2.svg", "L2": "Nederlands verkeersbord L2.svg"}
-CACHE = os.path.join(HERE, "..", "..", "design", "kunstwerken", "_textures", "signs")
+# the RVV signs NDW's sign register has round the kunstwerken (tools/ndw_signs.py; the user, 2026-10-22: "op de kaart
+# kan je precies zien waar elke paal bordje moet staan"), each in a cell of its own after the street furniture's
+RVV = ("A1", "A2", "B1", "B2", "B3", "B4", "B5", "C1", "C2", "C3", "C4", "C7", "C18", "C19", "C22", "D1", "D3", "D4",
+       "D5", "D7", "E1", "E2", "E4", "E6", "E7", "E8", "E9", "F3", "F5", "G3", "G4", "G5", "G7", "G12a", "J37", "L1",
+       "L9")
+for _i, _code in enumerate(RVV):
+    CELLS.setdefault(_code, 46 + _i)
+COMMONS = {code: f"Nederlands verkeersbord {code}.svg" for code in ("B6", "G11", "D2", "L2") + RVV}
+CACHE = os.environ.get("BNE_SIGN_CACHE") or os.path.join(HERE, "..", "..", "design", "kunstwerken", "_textures",
+                                                          "signs")
 RED, BLUE, WHITE, BLACK = (200, 16, 30), (0, 72, 150), (250, 250, 248), (18, 18, 18)
 SIGN_BLUE = (0, 66, 158)        # the direction signs' blue (RAL 5017's, a little deeper: the game's haze lifts it)
 
@@ -194,19 +201,31 @@ def commons(title):
     os.makedirs(CACHE, exist_ok=True)
     dst = os.path.join(CACHE, title.replace(" ", "_").replace(".svg", ".png"))
     if not os.path.exists(dst):
-        try:
-            q = urllib.parse.urlencode({"action": "query", "titles": "File:" + title, "prop": "imageinfo",
-                                        "iiprop": "url|extmetadata", "iiurlwidth": 512, "format": "json"})
-            hdr = {"User-Agent": "beamng-earth-tools/1.0"}
-            j = json.load(urllib.request.urlopen(urllib.request.Request(
-                "https://commons.wikimedia.org/w/api.php?" + q, headers=hdr), timeout=30))
-            ii = next(iter(j["query"]["pages"].values()))["imageinfo"][0]
-            if ii["extmetadata"].get("LicenseShortName", {}).get("value") != "Public domain":
+        import time
+        import urllib.error
+        hdr = {"User-Agent": "beamng-earth-tools/1.0 (https://github.com/storm-ace/BeamNG.Earth)"}
+        for attempt in range(6):        # (Commons answers a burst with 429: wait and ask again)
+            try:
+                time.sleep(1.5 * 2 ** attempt if attempt else 1.0)
+                q = urllib.parse.urlencode({"action": "query", "titles": "File:" + title, "prop": "imageinfo",
+                                            "iiprop": "url|extmetadata", "iiurlwidth": 512, "format": "json"})
+                j = json.load(urllib.request.urlopen(urllib.request.Request(
+                    "https://commons.wikimedia.org/w/api.php?" + q, headers=hdr), timeout=30))
+                ii = next(iter(j["query"]["pages"].values()))["imageinfo"][0]
+                if ii["extmetadata"].get("LicenseShortName", {}).get("value") != "Public domain":
+                    return None
+                with urllib.request.urlopen(urllib.request.Request(ii["thumburl"], headers=hdr), timeout=30) as f:
+                    open(dst, "wb").write(f.read())
+                break
+            except urllib.error.HTTPError as e:
+                if e.code != 429:
+                    print(f"  {title}: {e}")
+                    return None
+            except Exception as e:      # (offline: the drawn one)
+                print(f"  {title}: {e}")
                 return None
-            with urllib.request.urlopen(urllib.request.Request(ii["thumburl"], headers=hdr), timeout=30) as f:
-                open(dst, "wb").write(f.read())
-        except Exception as e:      # (offline: the drawn one)
-            print(f"  {title}: {e}")
+        else:
+            print(f"  {title}: still 429")
             return None
     return Image.open(dst).convert("RGBA")
 
@@ -232,15 +251,18 @@ def metal(im):
              + gaussian_filter(rng.normal(0, 1, (C, C)), (40, 0.8)) * 4)     # spangle, grain, streaks along v
         base = np.array([150, 154, 152] if name == "grey" else [140, 143, 142], np.float32)
         a[r] = np.clip(base + n[..., None] * np.array([1, 1, 1.05]), 0, 255)
-        rough[r] = 105 + gaussian_filter(rng.normal(0, 1, (C, C)), 5) * 18
-        metal_[r] = 215 if name == "grey" else 160
+        # (dull: the back smooth and metal took the sky and showed as a chrome disc, the user 2026-10-22)
+        rough[r] = 170 + gaussian_filter(rng.normal(0, 1, (C, C)), 5) * 18
+        metal_[r] = 120 if name == "grey" else 30
     for name in ("black", "stripes", "button"):
         r = region(name)
         n = gaussian_filter(rng.normal(0, 1, (C, C)), 1.5) * 3
         a[r] = np.clip(a[r] + n[..., None], 0, 255)
         rough[r] = 120 + n * 4                            # powder coat: satin
-    for name in ("B6", "G11", "D2", "L2", "light", "light_bike"):
-        rough[region(name)] = 80                          # the sign film and the lenses: smooth
+    for name in ("B6", "G11", "D2", "L2") + RVV:
+        rough[region(name)] = 110                         # the sign film: smooth, not a mirror
+    for name in ("light", "light_bike", "lens_red", "lens_amber", "lens_green"):
+        rough[region(name)] = 170                         # a dark lens: no glare of the sky that reads as lit
     for name in [n for n in CELLS if n.startswith(("route", "finger"))]:
         rough[region(name)] = 185                         # the big signs' film: matte (no sky in it, round 7)
     im.paste(Image.fromarray(a.astype(np.uint8)), (0, 0))
@@ -279,16 +301,16 @@ def main():
     d.line([(x + 128, y + 112), (x + 124, y + 150), (x + 108, y + 176)], fill=BLACK, width=8)
     d.line([(x + 124, y + 150), (x + 146, y + 176)], fill=BLACK, width=8)
     d.line([(x + 110, y + 128), (x + 146, y + 132)], fill=BLACK, width=7)
-    # a traffic light's face: black, three lenses (red lit, amber and green dark), visors' shadows
+    # a traffic light's face: black, three dark lenses, visors' shadows
     for name, bike in (("light", False), ("light_bike", True)):
         x, y = cell(d, CELLS[name])
         d.rectangle([x, y, x + C, y + C], fill=BLACK)
         d.rectangle([x + 70, y + 4, x + C - 70, y + C - 4], outline=(235, 235, 235), width=6)
-        for j, (on, off) in enumerate((((255, 40, 30), (90, 10, 10)), ((255, 170, 0), (90, 60, 0)),
-                                       ((40, 255, 120), (0, 70, 30)))):
+        # (all three dark: a fixed head read as lit red, amber and green at once, the user 2026-10-22; the heads
+        # that switch are the game's, tools/nl_signal_head.py)
+        for j, off in enumerate(((90, 10, 10), (90, 60, 0), (0, 70, 30))):
             cy = y + 44 + j * 84
-            col = on if j == 0 else off
-            d.ellipse([x + C / 2 - 34, cy - 34, x + C / 2 + 34, cy + 34], fill=col)
+            d.ellipse([x + C / 2 - 34, cy - 34, x + C / 2 + 34, cy + 34], fill=off)
             if bike:
                 bicycle(d, x + C / 2, cy + 4, 0.32, BLACK)
     # a sign's back and a plain pole: galvanised grey
@@ -314,8 +336,8 @@ def main():
     x, y = cell(d, CELLS["button"])
     d.rectangle([x, y, x + C, y + C], fill=(235, 190, 20))
     d.ellipse([x + 88, y + 88, x + 168, y + 168], fill=BLACK)
-    # lenses: a lit red, a dark amber and a dark green (a light at red as it stands), a soft glow to the rim
-    for name, (cc, rim) in {"lens_red": ((255, 60, 40), (140, 10, 5)), "lens_amber": ((95, 62, 10), (60, 40, 5)),
+    # lenses: a dark red, amber and green (a fixed head is not lit), a soft shade to the rim
+    for name, (cc, rim) in {"lens_red": ((95, 20, 14), (60, 8, 5)), "lens_amber": ((95, 62, 10), (60, 40, 5)),
                             "lens_green": ((10, 70, 40), (5, 40, 25))}.items():
         x, y = cell(d, CELLS[name])
         d.rectangle([x, y, x + C, y + C], fill=rim)

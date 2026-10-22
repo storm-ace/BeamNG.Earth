@@ -1096,12 +1096,14 @@ def main(argv=None):
         elif it["module"] == "traffic_light":
             mod = modules[("traffic_light", bool(it.get("bike")))]
         else:
-            mod = modules.setdefault(("sign", it["code"]), kit.sign(it["code"]))
+            code = it["code"] if isinstance(it["code"], str) else tuple(it["code"])     # (a post's plates: a list)
+            mod = modules.setdefault(("sign", code), kit.sign(code))
         f_ = np.asarray(it["facing"], np.float64)
         put(mod, q, np.arctan2(f_[1], f_[0]))
         if it["module"] == "traffic_light" and not it.get("mast"):
             head_at(q, f_)
         key = it.get("code") or it["role"]
+        key = key if isinstance(key, str) else "+".join(key)
         count[key] = count.get(key, 0) + 1
     # the direction signs read off Street View (ref/direction_signs.json: each its module, its arguments, its place
     # and the way its face looks)

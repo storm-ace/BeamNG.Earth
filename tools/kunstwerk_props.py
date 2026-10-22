@@ -8,7 +8,7 @@ blocked out: every module from a few lofted, lathed and bevelled primitives, tex
   visor, held off the pole by two brackets on clamp rings; optional a cyclists' head and a request button lower down.
 - mast_arm(): the big junctions' pole (light grey, 6.3 m, the band at its foot) with an arm over the lanes and a head
   hanging over each of them, a head on the pole too.
-- sign(): a 60 mm galvanised post with its cap; the plate (a disc, a square or a point-down triangle with rounded
+- sign(): a 60 mm galvanised post with its cap; its plates (a disc, a square, a diamond or a triangle with rounded
   corners) with its folded rim, its face the sign's cell, its back grey with two rails, clamped to the post.
 - gantry(): two tube posts, a box beam, the route signs on it.
 
@@ -29,6 +29,19 @@ HEAD = (0.36, 0.22, 1.02)       # m: the head's width, depth, height (a stadium)
 LENS_R = 0.105                  # m: a 200 mm lens
 SIGN_POST_R = 0.030
 PLATES = {"B6": ("triangle", 0.90), "G11": ("disc", 0.60), "D2": ("disc", 0.70), "L2": ("square", 0.60)}
+# the rest of the RVV by its series (BABW, built-up area sizes): B1/B2 a diamond, B3-B5 and J a triangle point up, G, L
+# and E4-E9 a square, the others a disc
+for _code in CELLS:
+    if _code in PLATES or not (_code[:1] in "ABCDEFGJL" and _code[1:2].isdigit()):
+        continue
+    if _code in ("B1", "B2"):
+        PLATES[_code] = ("diamond", 0.70)
+    elif _code[0] == "J" or _code in ("B3", "B4", "B5"):
+        PLATES[_code] = ("triangle_up", 0.90)
+    elif _code[0] in "GL" or (_code[0] == "E" and _code not in ("E1", "E2", "E3")) or _code in ("C3", "C4"):
+        PLATES[_code] = ("square", 0.60)
+    else:
+        PLATES[_code] = ("disc", 0.60)
 SIGN_TOP = 2.6                  # m: a plate's top over the ground
 
 
@@ -351,8 +364,12 @@ def _plate_outline(shape, size):
         return np.c_[size / 2 * np.cos(a), size / 2 * np.sin(a)]
     if shape == "square":
         return rrect(size, size, 0.03, n=3)
-    hgt = size * math.sqrt(3) / 2         # point down, its corners rounded
+    if shape == "diamond":
+        return np.array([[0, -size / 2], [size / 2, 0], [0, size / 2], [-size / 2, 0]])
+    hgt = size * math.sqrt(3) / 2         # point down (or up), its corners rounded
     corners = np.array([[0, -hgt * 2 / 3], [size / 2, hgt / 3], [-size / 2, hgt / 3]])
+    if shape == "triangle_up":
+        corners = -corners
     out = []
     rc = 0.045
     for i in range(3):
@@ -375,17 +392,29 @@ def _plate_outline(shape, size):
     return ring
 
 
+PLATE_GAP = 0.06            # m between two plates on one post
+
+
 def sign(code):
-    """A sign on its post: the plate's face toward +y, its back clamped to the post."""
-    shape, size = PLATES[code]
+    """A sign on its post: the plate's face toward +y, its back clamped to the post. code: one sign's, or a tuple of
+    the signs on one post from the top down (NDW's register puts several at one spot: one post, its plates stacked)."""
+    codes = (code,) if isinstance(code, str) else tuple(code)
     m = Mesh()
+    top = SIGN_TOP + 0.3 * (len(codes) - 1)      # (a post with more plates is taller: the lowest stays clear)
+    m.lathe([(SIGN_POST_R, -0.05), (SIGN_POST_R, top + 0.02), (SIGN_POST_R * 0.7, top + 0.04),
+             (0.001, top + 0.045)], "grey", seg=12)
+    for c_ in codes:
+        top = _sign_plate(m, c_, top) - PLATE_GAP
+    return m.out()
+
+
+def _sign_plate(m, code, top):
+    """A plate with its top at top on sign()'s post; returns its bottom."""
+    shape, size = PLATES[code]
     ring = _plate_outline(shape, size)
     lo, hi = ring.min(0), ring.max(0)
-    zc = SIGN_TOP - hi[1]
+    zc = top - hi[1]
     py = SIGN_POST_R + 0.045                     # the plate's back, off the post's axis
-    # the post and its cap
-    m.lathe([(SIGN_POST_R, -0.05), (SIGN_POST_R, zc + hi[1] + 0.02), (SIGN_POST_R * 0.7, zc + hi[1] + 0.04),
-             (0.001, zc + hi[1] + 0.045)], "grey", seg=12)
     # the plate: face, folded rim (a 2 cm lip back), back
     side = max(*(hi - lo))
     k = len(ring)
@@ -413,7 +442,7 @@ def sign(code):
         m.lathe([(SIGN_POST_R + 0.008, z - 0.025), (SIGN_POST_R + 0.008, z + 0.025)], "grey", seg=12,
                 cap_top=True, cap_bottom=True)
         m.bar((0, SIGN_POST_R, z), (0, py - 0.02, z), 0.03, 0.03, "grey")
-    return m.out()
+    return zc + lo[1]
 
 
 def gantry(span, h=6.6, signs=("route_havens", "route_centrum", "route_a13")):

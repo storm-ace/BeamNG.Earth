@@ -9,6 +9,8 @@ sit on the road's middle): ref/placement.json, for tools/kunstwerk_props.py's mo
 - an L2 (zebra): at OSM's zebra, on the right of each way's traffic, just off the carriageway, facing that traffic.
 - a D2 (keep right): on each island at a junction, at its nose toward the traffic (its point farthest from the
   junction), facing that traffic.
+- with NDW's sign register (ref/ndw/signs.json, tools/ndw_signs.py) instead of the last two: every sign where it
+  stands (ndw_signs).
 
     python3 tools/kunstwerk_placement.py ../design/kunstwerken/droogleever/ref
 
@@ -17,6 +19,7 @@ Writes ref/placement.json: {"items": [{"module": "traffic_light" | "sign", "code
 """
 import argparse
 import json
+import math
 import os
 import sys
 
@@ -50,6 +53,60 @@ OSM_CARS = {"motorway", "trunk", "primary", "secondary", "tertiary", "unclassifi
 def unit(v):
     v = np.asarray(v, np.float64)
     return v / max(np.hypot(*v), 1e-9)
+
+
+POST_M = 0.8            # m: NDW's signs this near each other (and looking the same way) are one post's plates
+ON_LIGHT_M = 1.5        # m: a sign this near a light (looking its way) is a plate on the light's pole
+ALONG_ROAD = 0.5        # cos: a road's axis this near the register's quarter gives the sign's exact facing
+# a post's plates from the top down: priority, then bans and orders, then the rest, the sub-signs (OB) last
+PLATE_ORDER = "BCFADEGLJ"
+
+
+def ndw_signs(feats, items, local, inside_box, road_axis):
+    """NDW's signs (GeoJSON features) as items: beside the road (placement L), with a code the kit draws; their facing
+    against the register's bearing (the way the traffic they speak to drives: toward the junction for a give-way
+    sign, 2026-10-22), set square to the road there where its lanes say which way it runs. Signs at one spot one post,
+    a sign by a light a plate on its pole. Returns (posts, plates on lights, left out)."""
+    import kunstwerk_props as kit
+    signs, skipped = [], 0
+    for f in feats:
+        pr = f["properties"]
+        code = pr.get("rvvCode") or ""
+        p = local({"lat": f["geometry"]["coordinates"][1], "lon": f["geometry"]["coordinates"][0]})
+        if code not in kit.PLATES or pr.get("placement") != "L" or not inside_box(p):
+            skipped += 1
+            continue
+        b = math.radians(float(pr.get("bearing") or 0.0))
+        face = -np.array([math.sin(b), math.cos(b)])          # (RD: x east, y north)
+        ax = road_axis(p)
+        if ax is not None and abs(float(ax @ face)) >= ALONG_ROAD:
+            face = ax if ax @ face > 0 else -ax
+        signs.append((p, unit(face), code))
+    posts = []
+    for p, face, code in signs:
+        for post in posts:
+            if np.hypot(*(post["p"] - p)) < POST_M and post["face"] @ face > 0.7:
+                if code not in post["codes"]:
+                    post["codes"].append(code)
+                break
+        else:
+            posts.append({"p": p, "face": face, "codes": [code]})
+    n_posts = n_light = 0
+    for post in posts:
+        codes = sorted(post["codes"], key=lambda c: (PLATE_ORDER.find(c[0]), c))
+        light = min((it for it in items if it["module"] == "traffic_light" and not it.get("mast")),
+                    key=lambda it: np.hypot(*(np.asarray(it["at"]) - post["p"])), default=None)
+        if light is not None and np.hypot(*(np.asarray(light["at"]) - post["p"])) < ON_LIGHT_M \
+                and np.asarray(light["facing"]) @ post["face"] > 0.5:
+            light.setdefault("plates", [])
+            light["plates"] += [c for c in codes if c not in light["plates"]]
+            n_light += len(codes)
+            continue
+        items.append({"module": "sign", "code": codes if len(codes) > 1 else codes[0], "role": "ndw",
+                      "at": [round(float(v), 3) for v in post["p"]],
+                      "facing": [round(float(v), 4) for v in post["face"]]})
+        n_posts += 1
+    return n_posts, n_light, skipped
 
 
 def main(argv=None):
@@ -336,7 +393,14 @@ def main(argv=None):
         n_mast = sum(1 for o in items if o.get("mast"))
     print(f"OSM's ways: {n_osm} lights added, {n_mast} masts")
     n_l2 = 0
-    for e_ in osm:
+    # the signs where NDW's register has them (tools/ndw_signs.py: ref/ndw/signs.json): each where it stands, its code
+    # and its plates; without the register the rules' zebra signs and keep-right noses below
+    ndw_path = os.path.join(a.ref, "ndw", "signs.json")
+    ndw = json.load(open(ndw_path, encoding="utf-8")) if os.path.exists(ndw_path) else None
+    if ndw is not None:
+        n_posts, n_on_lights, n_skipped = ndw_signs(ndw, items, local, inside_box, road_axis)
+        print(f"NDW's signs: {n_posts} posts, {n_on_lights} plates on the lights' poles, {n_skipped} left out")
+    for e_ in (osm if ndw is None else ()):
         if e_["tags"].get("crossing") != "zebra":
             continue
         p = local(e_)
@@ -363,7 +427,7 @@ def main(argv=None):
     for c in centre.values():                       # (the junctions, each once)
         if all(np.hypot(*(c - d)) > 15 for d in cs):
             cs.append(c)
-    for i in range(1, nis + 1):
+    for i in range(1, nis + 1 if ndw is None else 1):
         rr, cc = np.nonzero(lbl == i)
         if len(rr) * ks.RES ** 2 < 4.0 or not cs:
             continue
