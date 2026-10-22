@@ -55,7 +55,71 @@ def unit(v):
     return v / max(np.hypot(*v), 1e-9)
 
 
-POST_M = 0.8            # m: NDW's signs this near each other (and looking the same way) are one post's plates
+def item_id(it):
+    """An item's stable id (ref/overrides.json): its module, its code (else its role) and its spot to a decimetre, as
+    the pipeline places it (after ref/placement_fix.json, before any override). Pure."""
+    tag = it.get("code") or it.get("role") or ""
+    tag = tag if isinstance(tag, str) else "+".join(tag)
+    return f"{it['module']}:{tag}@{float(it['at'][0]):.1f},{float(it['at'][1]):.1f}"
+
+
+def apply_fixes(items, fixes, log=print):
+    """ref/placement_fix.json's fixes (Street View's corrections) on items: each matched to the item of its module
+    nearest its 'near' (within 2 m) and moved or removed, an 'add' appended. Returns items."""
+    items = list(items)
+    for fx in fixes:
+        if fx["action"] == "add":
+            items.append({k: v for k, v in fx.items() if k not in ("action", "why")})
+            continue
+        near = np.asarray(fx["near"], np.float64)
+        cand = [i for i, it in enumerate(items) if it["module"] == fx["module"]
+                and np.hypot(*(np.asarray(it["at"]) - near)) < 2.0]
+        if not cand:
+            log(f"placement fix: nothing near {fx['near']} ({fx['why']})")
+            continue
+        i = min(cand, key=lambda i: np.hypot(*(np.asarray(items[i]["at"]) - near)))
+        if fx["action"] == "remove":
+            items.pop(i)
+        else:
+            items[i].update({k: v for k, v in fx.items() if k not in ("action", "why", "near")})
+    return items
+
+
+def apply_overrides(items, overrides, approaches=()):
+    """ref/overrides.json (tools/dashboard: [{"id": item_id, and any of "at" [x, y], "approach" (an index into
+    ref/approaches.json: its face toward that way's traffic), "heading" (degrees from north, clockwise), "facing"
+    [fx, fy], "code", "remove": true}]) on items, each by its id; every item gets its "id" (a repeated one "#2", ...).
+    Returns new items. Pure."""
+    by = {o["id"]: o for o in overrides}
+    out, seen = [], {}
+    for it in items:
+        i = item_id(it)
+        seen[i] = seen.get(i, 0) + 1
+        i = i if seen[i] == 1 else f"{i}#{seen[i]}"
+        it = dict(it, id=i)
+        o = by.get(i)
+        if o is not None:
+            if o.get("remove"):
+                continue
+            if "at" in o:
+                it["at"] = [round(float(o["at"][0]), 3), round(float(o["at"][1]), 3)]
+            if o.get("approach") is not None and 0 <= int(o["approach"]) < len(approaches):
+                ap_ = approaches[int(o["approach"])]
+                r = unit(np.subtract(ap_["right"], ap_["left"]))
+                it["facing"] = [round(float(r[1]), 4), round(float(-r[0]), 4)]   # (the way in turned about)
+                it["approach"] = int(o["approach"])
+            if o.get("heading") is not None:
+                b = math.radians(float(o["heading"]))
+                it["facing"] = [round(math.sin(b), 4), round(math.cos(b), 4)]
+            if o.get("facing") is not None:
+                it["facing"] = [round(float(v), 4) for v in unit(o["facing"])]
+            if o.get("code"):
+                it["code"] = o["code"]
+        out.append(it)
+    return out
+
+
+POST_M = 0.8           # m: NDW's signs this near each other (and looking the same way) are one post's plates
 ON_LIGHT_M = 1.5        # m: a sign this near a light (looking its way) is a plate on the light's pole
 ALONG_ROAD = 0.5        # cos: a road's axis this near the register's quarter gives the sign's exact facing
 # a post's plates from the top down: priority, then bans and orders, then the rest, the sub-signs (OB) last

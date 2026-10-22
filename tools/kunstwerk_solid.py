@@ -1048,22 +1048,14 @@ def main(argv=None):
     # way its face looks, toward the traffic it speaks to)
     pl_path = os.path.join(a.ref, "placement.json")
     items = json.load(open(pl_path))["items"] if os.path.exists(pl_path) else []
+    import kunstwerk_placement as kp
     fx_path = os.path.join(a.ref, "placement_fix.json")      # (the corrections read off Street View: by place)
-    for fx in (json.load(open(fx_path))["fixes"] if os.path.exists(fx_path) else ()):
-        if fx["action"] == "add":
-            items.append({k: v for k, v in fx.items() if k not in ("action", "why")})
-            continue
-        near = np.asarray(fx["near"], np.float64)
-        cand = [i for i, it in enumerate(items) if it["module"] == fx["module"]
-                and np.hypot(*(np.asarray(it["at"]) - near)) < 2.0]
-        if not cand:
-            print(f"placement fix: nothing near {fx['near']} ({fx['why']})")
-            continue
-        i = min(cand, key=lambda i: np.hypot(*(np.asarray(items[i]["at"]) - near)))
-        if fx["action"] == "remove":
-            items.pop(i)
-        else:
-            items[i].update({k: v for k, v in fx.items() if k not in ("action", "why", "near")})
+    items = kp.apply_fixes(items, json.load(open(fx_path))["fixes"] if os.path.exists(fx_path) else ())
+    # then the hand overrides (ref/overrides.json, each by its item's id: kunstwerk_placement.apply_overrides)
+    ov_path, ap_path = os.path.join(a.ref, "overrides.json"), os.path.join(a.ref, "approaches.json")
+    overrides = json.load(open(ov_path, encoding="utf-8")) if os.path.exists(ov_path) else []
+    aps = json.load(open(ap_path))["approaches"] if os.path.exists(ap_path) else []
+    items = kp.apply_overrides(items, overrides, aps)
     if not items:
         print(f"street furniture: no {pl_path} (tools/kunstwerk_placement.py): no lights or signs")
     # a low light's pole without its head: the game puts its switchable Dutch head there (tools/nl_signal_head.py,
@@ -1108,7 +1100,11 @@ def main(argv=None):
     # the direction signs read off Street View (ref/direction_signs.json: each its module, its arguments, its place
     # and the way its face looks)
     ds_path = os.path.join(a.ref, "direction_signs.json")
-    for it in (json.load(open(ds_path))["signs"] if os.path.exists(ds_path) else ()):
+    dsigns = kp.apply_overrides(json.load(open(ds_path))["signs"] if os.path.exists(ds_path) else (), overrides, aps)
+    if overrides:
+        lost = {o["id"] for o in overrides} - {it["id"] for it in items + dsigns}
+        print(f"overrides: {len(overrides) - len(lost)} applied" + (f", no item for {sorted(lost)}" if lost else ""))
+    for it in dsigns:
         q = np.asarray(it["at"], np.float64)
         f_ = np.asarray(it["facing"], np.float64)
         put(getattr(kit, it["module"])(*it["args"]), q, np.arctan2(f_[1], f_[0]))
