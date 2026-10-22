@@ -91,6 +91,17 @@ class RulesTest(unittest.TestCase):
         self.assertEqual(s[4][:2], (roads.STYLE["track"][0], "gravel"))
         self.assertIsNone(s[5], "bridge flag left out")
 
+    def test_cycleway_in_a_tunnel_not_drawn(self):
+        """A cycleway (Overture's class; OSM's tunnel=yes, layer=-1: 's-Gravendijkwal's four under Droogleever's ring)
+        is neither a road on the ground nor a tunnel the generator builds: on the ground it would run through the
+        terrain over the passage. Where it is drawn, it is the BGT's (its fietspad, dug passages: bgt.passages) or a
+        kunstwerk's (its own passages, tools/kunstwerk_solid.py; the BGT's left out under its floor:
+        kunstwerken.covered, test_kunstwerken DroogleeverCycleTunnelTest)."""
+        f = features([[(0, 0), (30, 0)]] * 2, ["cycleway", "cycleway"], levels=[(0, -1.0)],
+                     flags=[(0, "is_tunnel"), (1, "is_tunnel", 0.3, 0.7)])
+        self.assertEqual(roads.road_specs(f), [None, None])
+        self.assertEqual(roads.tunnel_specs(f), [None, None], "(TunnelProfiles takes the parts of a spec only)")
+
     def test_carriageway_parking_and_strips(self):
         res = roads.STYLE["residential"][0]
         self.assertEqual(roads.carriageway("residential", "paved", True), res + 2 * roads.PARKING_M, "city street: parking")

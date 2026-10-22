@@ -291,5 +291,116 @@ class ShippedPaintTest(unittest.TestCase):
             self.assertLess(float(z[int(y - f["y0"]), int(x - f["x0"])]), 0.0, f"floor at ({x}, {y})")
 
 
+class DroogleeverCycleTunnelTest(unittest.TestCase):
+    """The cycle paths along 's-Gravendijkwal pass under Droogleever's ring and the Westzeedijk in passages of their own
+    beside the trench (OSM's tunnel=yes, layer=-1 cycleways), not up the ring's embankment and through it as solid
+    ground (in game 2026-10-22: "de fietspad gaat door de grond, niet ondergronds"). Their lines in the kunstwerk's
+    local RD metres (ref/osm_map.xml): each end is a portal."""
+
+    TUNNELS = {"45754201": ((3, -36), (10, -60)), "45754202": ((45, -51), (37, -21)),
+               "45754204": ((16, 48), (6, 73)), "45754210": ((-33, 60), (-21, 32))}
+    CLEARANCE = 2.5             # m over the path under a deck (tools/kunstwerk_solid.py CYCLE_CLEARANCE)
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        d = json.load(open(Path(kunstwerken.DIR) / "droogleever.kunstwerk.json"))
+        cls.k = kunstwerken.Kunstwerk(d)
+        cls.P = np.asarray(d["positions"], np.float64)
+        cls.T = np.asarray(d["tris"], np.int64)
+
+    def _centre(self, name):
+        """The passage's middle line under its deck: the deck over the tunnel's middle (a ring round the band beside
+        the trench, its corners at both ends' inner and outer edge), from end to end."""
+        a, b = (np.asarray(v, np.float64) for v in self.TUNNELS[name])
+        m = (a + b) / 2
+        for ring, _ in self.k.decks:
+            if len(ring) == 4 and kunstwerken._inside(ring, m[:1], m[1:])[0]:
+                return (ring[0] + ring[3]) / 2, (ring[1] + ring[2]) / 2
+        self.fail(f"{name}: no deck of its own over it")
+
+    def _line(self, a, b, step=0.5, reach=0.0):
+        a, b = np.asarray(a, np.float64), np.asarray(b, np.float64)
+        u = (b - a) / np.hypot(*(b - a))
+        s = np.arange(-reach, np.hypot(*(b - a)) + reach + 1e-6, step)
+        return a + np.outer(s, u)
+
+    def _wgs(self, xy):
+        o = self.k.origin
+        return ahn.rd_to_wgs(xy[:, 0] + o[0], xy[:, 1] + o[1])
+
+    def _solid_over(self, xy, lo, hi):
+        """Per point whether a triangle of the kunstwerk covers it between heights lo and hi (per point)."""
+        A, B, C = (self.P[self.T[:, j]] for j in range(3))
+        box_lo, box_hi = np.minimum(np.minimum(A, B), C), np.maximum(np.maximum(A, B), C)
+        out = np.zeros(len(xy), bool)
+        for i, (x, y) in enumerate(xy):
+            m = np.flatnonzero((box_lo[:, 0] <= x) & (box_hi[:, 0] >= x) & (box_lo[:, 1] <= y) & (box_hi[:, 1] >= y)
+                               & (box_hi[:, 2] > lo[i]) & (box_lo[:, 2] < hi[i]))
+            for j in m:
+                a, b, c = A[j], B[j], C[j]
+                d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1])
+                if abs(d) < 1e-12:
+                    continue
+                w1 = ((b[1] - c[1]) * (x - c[0]) + (c[0] - b[0]) * (y - c[1])) / d
+                w2 = ((c[1] - a[1]) * (x - c[0]) + (a[0] - c[0]) * (y - c[1])) / d
+                w3 = 1 - w1 - w2
+                if min(w1, w2, w3) >= -1e-9 and lo[i] < w1 * a[2] + w2 * b[2] + w3 * c[2] < hi[i]:
+                    out[i] = True
+                    break
+        return out
+
+    def test_headroom_under_the_decks(self):
+        """Along each passage's middle under its deck (its ends 1 m in): a floor (the kunstwerk's, the cycle path's red)
+        with a deck over it at least CLEARANCE over its slab's underside, and nothing of the kunstwerk in between."""
+        for name in self.TUNNELS:
+            xy = self._line(*self._centre(name))
+            xy = xy[2:-2]
+            la, lo = self._wgs(xy)
+            floor = self.k.floor_at(la, lo)
+            top = self.k.deck_top(la, lo)
+            self.assertTrue(np.isfinite(floor).all(), f"{name}: a floor all along")
+            self.assertTrue(np.isfinite(top).all(), f"{name}: a deck all over it")
+            self.assertLess(float(np.max(floor)), 1.0, f"{name}: the path in the cut, not on the ring")
+            room = top - DECK_T - floor
+            self.assertGreaterEqual(float(room.min()), self.CLEARANCE - 0.1, f"{name}: headroom {room.min():.2f} m")
+            hit = self._solid_over(xy, floor + 0.15, floor + self.CLEARANCE - 0.1)
+            self.assertFalse(hit.any(), f"{name}: solid in the passage at {xy[hit][:3].round(1).tolist()}")
+
+    def test_ramps_without_a_hump(self):
+        """From 25 m before a portal to 25 m past the other the floor along the passage climbs and drops no more than
+        a ramp's (the path rose 3.5 m onto the ring before), and the terrain is kept under it."""
+        for name in self.TUNNELS:
+            xy = self._line(*self._centre(name), 1.0, reach=25.0)
+            la, lo = self._wgs(xy)
+            floor = self.k.floor_at(la, lo)
+            ok = np.isfinite(floor)
+            self.assertGreater(ok.mean(), 0.9, name)
+            f = floor[ok]
+            self.assertLess(float(np.ptp(f)), 1.2, f"{name}: floor {f.min():.2f}..{f.max():.2f}")
+            self.assertLess(float(np.abs(np.diff(f)).max()), 0.2, f"{name}: a step along it")
+            saved, kunstwerken._all = kunstwerken._all, [self.k]
+            try:
+                ground = kunstwerken.cap(lambda a_, b_: np.full(np.shape(a_), 3.4))(la[ok], lo[ok])
+            finally:
+                kunstwerken._all = saved
+            self.assertTrue((ground <= f - kunstwerken.CAP_M + 1e-6).all(), f"{name}: the terrain over the path")
+
+    def test_the_generators_path_left_out(self):
+        """The BGT's fietspad there (level -1 under the deck, its ramps at 0) is the kunstwerk's: covered, so bgt.mesh
+        leaves it out (skip) and blockworker's _kw_cut the rest; OSM's cycleways the generator draws not at all
+        (roads.STYLE: test_roads)."""
+        for name in self.TUNNELS:
+            la, lo = self._wgs(self._line(*self._centre(name), 1.0, reach=10.0))
+            saved, kunstwerken._all = kunstwerken._all, [self.k]
+            try:
+                self.assertTrue(kunstwerken.covered(la, lo).all(), name)
+            finally:
+                kunstwerken._all = saved
+
+
+DECK_T = 0.9                # m: a deck's slab (tools/kunstwerk_solid.py)
+
+
 if __name__ == "__main__":
     unittest.main()
