@@ -62,12 +62,49 @@ ALONG_ROAD = 0.5        # cos: a road's axis this near the register's quarter gi
 PLATE_ORDER = "BCFADEGLJ"
 
 
-def ndw_signs(feats, items, local, inside_box, road_axis):
+def osm_ways(path, local):
+    """OSM's roads and paths at grade (osm_map.xml) as segments (a (k, 2), b (k, 2)) in the kunstwerk's metres."""
+    import xml.etree.ElementTree as ET
+    if not os.path.exists(path):
+        return np.zeros((0, 2)), np.zeros((0, 2))
+    root = ET.parse(path).getroot()
+    nodes = {n.get("id"): n for n in root.findall("node")}
+    A, B = [], []
+    for w in root.findall("way"):
+        t = {x.get("k"): x.get("v") for x in w.findall("tag")}
+        if "highway" not in t or t.get("layer", "0") != "0" or t.get("tunnel") not in (None, "no"):
+            continue
+        pts = [local({"lat": float(nodes[r].get("lat")), "lon": float(nodes[r].get("lon"))})
+               for r in (nd.get("ref") for nd in w.findall("nd")) if r in nodes]
+        A += pts[:-1]
+        B += pts[1:]
+    return np.array(A).reshape(-1, 2), np.array(B).reshape(-1, 2)
+
+
+OSM_AXIS_M = 12.0       # m: an OSM way this near a sign gives its road's direction
+
+
+def ndw_signs(feats, items, local, inside_box, road_axis, ways=(np.zeros((0, 2)), np.zeros((0, 2)))):
     """NDW's signs (GeoJSON features) as items: beside the road (placement L), with a code the kit draws; their facing
     against the register's bearing (the way the traffic they speak to drives: toward the junction for a give-way
-    sign, 2026-10-22), set square to the road there where its lanes say which way it runs. Signs at one spot one post,
+    sign, 2026-10-22), set square to the road there where its lanes say which way it runs, else where OSM's nearest way
+    does (the register's quarter alone turned every sign to a compass point). Signs at one spot one post,
     a sign by a light a plate on its pole. Returns (posts, plates on lights, left out)."""
     import kunstwerk_props as kit
+    WA, WB = ways
+
+    def osm_axis(p, face):
+        """The direction (an axis) of the OSM way nearest p within OSM_AXIS_M among those running along face's
+        quarter (a sign speaks to a road it stands square to), or None."""
+        if not len(WA):
+            return None
+        d = WB - WA
+        L2 = np.maximum((d * d).sum(1), 1e-9)
+        t = np.clip(((p - WA) * d).sum(1) / L2, 0, 1)
+        dist = np.hypot(*(WA + d * t[:, None] - p).T)
+        u = d / np.sqrt(L2)[:, None]
+        ok = (dist < OSM_AXIS_M) & (np.abs(u @ face) >= ALONG_ROAD)
+        return u[np.flatnonzero(ok)[np.argmin(dist[ok])]] if ok.any() else None
     signs, skipped = [], 0
     for f in feats:
         pr = f["properties"]
@@ -79,6 +116,8 @@ def ndw_signs(feats, items, local, inside_box, road_axis):
         b = math.radians(float(pr.get("bearing") or 0.0))
         face = -np.array([math.sin(b), math.cos(b)])          # (RD: x east, y north)
         ax = road_axis(p)
+        if ax is None or abs(float(ax @ face)) < ALONG_ROAD:
+            ax = osm_axis(p, face)                            # (no lane dashes there: the nearest OSM way's)
         if ax is not None and abs(float(ax @ face)) >= ALONG_ROAD:
             face = ax if ax @ face > 0 else -ax
         signs.append((p, unit(face), code))
@@ -398,7 +437,8 @@ def main(argv=None):
     ndw_path = os.path.join(a.ref, "ndw", "signs.json")
     ndw = json.load(open(ndw_path, encoding="utf-8")) if os.path.exists(ndw_path) else None
     if ndw is not None:
-        n_posts, n_on_lights, n_skipped = ndw_signs(ndw, items, local, inside_box, road_axis)
+        n_posts, n_on_lights, n_skipped = ndw_signs(ndw, items, local, inside_box, road_axis,
+                                                    osm_ways(os.path.join(a.ref, "osm_map.xml"), local))
         print(f"NDW's signs: {n_posts} posts, {n_on_lights} plates on the lights' poles, {n_skipped} left out")
     for e_ in (osm if ndw is None else ()):
         if e_["tags"].get("crossing") != "zebra":
