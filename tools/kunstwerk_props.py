@@ -232,33 +232,102 @@ def _stadium_face(m, x, y, zc, w, h, cell, seg=12):
           cell_uv(cell, np.r_[0.5, uv[:, 0]], np.r_[0.5, uv[:, 1]]), two_sided=True)
 
 
-def head_lenses(scale=1.0):
-    """The three lenses' heights relative to the head's middle (red, amber, green) and their radius."""
-    w, d, h = (v * scale for v in HEAD)
+def _head_h(scale=1.0, n=3):
+    """A head's height for n lenses (the three-lens HEAD less a lens pitch for each one fewer: a pedestrians' head has
+    two)."""
+    h3 = HEAD[2] * scale
+    pitch = (h3 - 0.07 * scale - 2 * LENS_R * scale - 0.12 * scale) / 2
+    return h3 - (3 - n) * pitch
+
+
+def head_lenses(scale=1.0, n=3):
+    """The lenses' heights relative to the head's middle (red, amber, green; with n=2 red and green) and their
+    radius."""
+    h = _head_h(scale, n)
     lr = LENS_R * scale
-    pitch = (h - 0.07 * scale - 2 * lr - 0.12 * scale) / 2
+    pitch = (HEAD[2] * scale - 0.07 * scale - 2 * lr - 0.12 * scale) / 2
     top = (h - 0.07 * scale) / 2 - lr - 0.03 * scale
-    return [top - i * pitch for i in range(3)], lr
+    return [top - i * pitch for i in range(n)], lr
 
 
-def _head(m, y_back, zc, scale=1.0, x=0.0, lenses=True):
+# The figures in a lens (Dutch pedestrians' and cyclists' heads light a symbol, not the whole lens: RVV 1990 art. 69,
+# 70): strokes in a lens of radius 1 (x across, z up), ("seg", x0, z0, x1, z1, half width) or ("disc", x, z, r) or
+# ("ring", x, z, r, half width). The lens is masked black round them (lens_mask)
+FIGURES = {
+    "stand": [("disc", 0.0, 0.58, 0.16), ("seg", 0.0, 0.36, 0.0, -0.08, 0.17), ("seg", -0.2, 0.32, -0.26, -0.06, 0.07),
+              ("seg", 0.2, 0.32, 0.26, -0.06, 0.07), ("seg", -0.08, -0.1, -0.09, -0.72, 0.08),
+              ("seg", 0.08, -0.1, 0.09, -0.72, 0.08)],
+    "walk": [("disc", 0.06, 0.6, 0.15), ("seg", 0.02, 0.38, -0.04, -0.06, 0.14),
+             ("seg", 0.0, 0.32, 0.3, 0.02, 0.065), ("seg", -0.04, 0.32, -0.32, 0.08, 0.065),
+             ("seg", -0.04, -0.08, 0.32, -0.7, 0.08), ("seg", -0.06, -0.08, -0.36, -0.68, 0.08)],
+    "bike": [("ring", -0.42, -0.2, 0.28, 0.06), ("ring", 0.42, -0.2, 0.28, 0.06), ("seg", -0.42, -0.2, -0.1, 0.22, 0.05),
+             ("seg", -0.1, 0.22, 0.32, 0.22, 0.05), ("seg", 0.32, 0.22, 0.42, -0.2, 0.05),
+             ("seg", -0.42, -0.2, 0.05, -0.2, 0.05), ("seg", 0.05, -0.2, -0.1, 0.22, 0.05),
+             ("seg", 0.05, -0.2, 0.32, 0.22, 0.05), ("seg", 0.3, 0.3, 0.42, 0.42, 0.05),
+             ("seg", -0.16, 0.3, -0.02, 0.3, 0.05)],
+}
+
+
+def figure_at(fig, x, z):
+    """Whether the points (x, z) (in a lens of radius 1) lie on the figure's strokes."""
+    x, z = np.asarray(x, np.float64), np.asarray(z, np.float64)
+    on = np.zeros(np.broadcast(x, z).shape, bool)
+    for s in FIGURES[fig]:
+        if s[0] == "disc":
+            on |= np.hypot(x - s[1], z - s[2]) <= s[3]
+        elif s[0] == "ring":
+            on |= np.abs(np.hypot(x - s[1], z - s[2]) - s[3]) <= s[4]
+        else:
+            ax, az, bx, bz, hw = s[1:]
+            dx, dz = bx - ax, bz - az
+            t = np.clip(((x - ax) * dx + (z - az) * dz) / max(dx * dx + dz * dz, 1e-12), 0.0, 1.0)
+            on |= np.hypot(x - ax - t * dx, z - az - t * dz) <= hw
+    return on
+
+
+def lens_mask(m, x, y, z, r, fig, cells=24, reach=1.12):
+    """A black mask over a lens facing +y at (x, y, z) of radius r with the figure fig left open: the grid's cells
+    (cells across reach lens radii, over the bezel's inner edge) off the figure, each row's runs one quad (a cell is
+    left open when its middle is on a stroke)."""
+    c = ((np.arange(cells) + 0.5) / cells * 2 - 1) * reach        # cell middles in the unit lens
+    gx, gz = np.meshgrid(c, c)
+    keep = (np.hypot(gx, gz) <= reach) & ~figure_at(fig, gx, gz)
+    h = r * reach / cells
+    P, T = [], []
+    for j in range(cells):                      # (each row's runs of masked cells one quad)
+        row = np.r_[False, keep[j], False].astype(int)
+        for i0, i1 in zip(np.flatnonzero(np.diff(row) == 1), np.flatnonzero(np.diff(row) == -1)):
+            xa, xb, cz = x + gx[j, i0] * r - h, x + gx[j, i1 - 1] * r + h, z + gz[j, 0] * r
+            k = len(P)
+            P += [(xb, y, cz - h), (xa, y, cz - h), (xa, y, cz + h), (xb, y, cz + h)]
+            T += [[k, k + 2, k + 1], [k, k + 3, k + 2]]
+    if P:
+        m.add(P, T, cell_uv("black", np.full(len(P), 0.5), np.full(len(P), 0.5)), two_sided=True)
+
+
+def _head(m, y_back, zc, scale=1.0, x=0.0, lenses=True, n=3, figures=None):
     """A Rotterdam three-lens head facing +y (its back at y_back, its middle at height zc): a black stadium body, the
     white contrast rim round its face, three lenses flush in it (no hoods), its number plate under the lowest.
-    lenses=False: their bezels only (tools/nl_signal_head.py puts the game's switchable lenses in them)."""
-    w, d, h = (v * scale for v in HEAD)
+    lenses=False: their bezels only (tools/nl_signal_head.py puts the game's switchable lenses in them). n=2: a
+    pedestrians' head (red and green); figures: per lens the symbol it lights (FIGURES; tools/nl_signal_head.py masks
+    the game's lenses round them)."""
+    w, d = HEAD[0] * scale, HEAD[1] * scale
+    h = _head_h(scale, n)
     yf = y_back + d
     _stadium(m, x, y_back, yf, zc, w, h, "black")
     _stadium_face(m, x, yf + 0.001, zc, w, h, "white")                 # the rim
     _stadium_face(m, x, yf + 0.002, zc, w - 0.07 * scale, h - 0.07 * scale, "black")
     lr = LENS_R * scale
-    pitch = (h - 0.07 * scale - 2 * lr - 0.12 * scale) / 2
+    pitch = (HEAD[2] * scale - 0.07 * scale - 2 * lr - 0.12 * scale) / 2
     top = zc + (h - 0.07 * scale) / 2 - lr - 0.03 * scale
-    for i, cell in enumerate(("lens_red", "lens_amber", "lens_green")):
+    for i, cell in enumerate(("lens_red", "lens_amber", "lens_green") if n == 3 else ("lens_red", "lens_green")):
         z = top - i * pitch
         m.annulus_y(x, yf + 0.005, z, lr, lr + 0.012 * scale, "black", depth=0.002)
         if lenses:
             m.disc_y(x, yf + 0.004, z, lr, cell, bulge=0.006 * scale)
-    zl = top - 2 * pitch - lr - 0.045 * scale
+        if figures and figures[i]:          # (just in front of the lens: ours, or the game's put in the bezel)
+            lens_mask(m, x, yf + 0.0115 * scale, z, lr, figures[i])
+    zl = top - (n - 1) * pitch - lr - 0.045 * scale
     m.add([(x + 0.035 * scale, yf + 0.004, zl - 0.018 * scale), (x - 0.035 * scale, yf + 0.004, zl - 0.018 * scale),
            (x - 0.035 * scale, yf + 0.004, zl + 0.018 * scale), (x + 0.035 * scale, yf + 0.004, zl + 0.018 * scale)],
           [[0, 2, 1], [0, 3, 2]], cell_uv("white", [0, 1, 1, 0], [0, 0, 1, 1]), two_sided=True)
@@ -287,17 +356,28 @@ def bike_mount():
     return POLE_R + 0.03, BIKE_HEAD_Z, BIKE_SCALE
 
 
-def signal_head(lenses=True, bike=False):
+PED_HEAD_Z = 2.45              # m: a crossing pole's pedestrians' head's middle over the ground
+CROSS_POLE_H = 2.95            # m: a crossing pole (its pedestrians' head at the top, the cyclists' under it)
+
+
+def ped_mount():
+    """(y of the back, height of the middle) of crossing_pole()'s pedestrians' head (two lenses, full size)."""
+    return POLE_R + 0.03, PED_HEAD_Z
+
+
+def signal_head(lenses=True, bike=False, ped=False):
     """traffic_light()'s head alone with its clamps, its frame on the pole's axis at the head's middle; bike: its
-    cyclists' head (smaller, no clamps: bike_mount)."""
+    cyclists' head (smaller, no clamps: bike_mount); ped: a crossing's pedestrians' head (two lenses, the red man
+    standing over the green one walking, its clamps: ped_mount)."""
     m = Mesh()
     if bike:
         yb, _, s = bike_mount()
-        _head(m, yb, 0.0, scale=s, lenses=lenses)
+        _head(m, yb, 0.0, scale=s, lenses=lenses, figures=("bike",) * 3)
         return m.out()
     yb, _ = head_mount()
-    _head(m, yb, 0.0, lenses=lenses)
-    for z in (HEAD[2] / 2 - 0.15, -HEAD[2] / 2 + 0.15):
+    h = _head_h(1.0, 2 if ped else 3)
+    _head(m, yb, 0.0, lenses=lenses, n=2 if ped else 3, figures=("stand", "walk") if ped else None)
+    for z in (h / 2 - 0.15, -h / 2 + 0.15):
         m.lathe([(POLE_R + 0.008, z - 0.03), (POLE_R + 0.008, z + 0.03)], "black", seg=16, cap_top=True,
                 cap_bottom=True)
         m.bar((0, 0.0, z), (0, POLE_R + 0.04, z), 0.06, 0.04, "black")
@@ -336,6 +416,20 @@ def traffic_light(bike=False, button=True, plates=(), head=True):
         m.add([(0.05, POLE_R + 0.106, 1.04), (-0.05, POLE_R + 0.106, 1.04), (-0.05, POLE_R + 0.106, 1.20),
                (0.05, POLE_R + 0.106, 1.20)], [[0, 2, 1], [0, 3, 2]], cell_uv("button", [0, 1, 1, 0], [0, 0, 1, 1]),
               two_sided=True)
+    return m.out()
+
+
+def crossing_pole(ped=True, bike=False):
+    """A signalled crossing's pole at its kerb (Rotterdam's: the ringed pole, lower than a junction's), its heads the
+    game's (tools/nl_signal_head.py; server kunstwerken.hide_heads): the pedestrians' head at its top (ped_mount)
+    looking across the road at the far kerb's pedestrians (-y), the cyclists' head under it (bike_mount) looking at
+    the cyclists arriving here (+y); the request button for those who wait here (+y)."""
+    m = Mesh()
+    _pole(m, POLE_R, CROSS_POLE_H if ped else BIKE_HEAD_Z + 0.5)
+    m.rounded_box((0, POLE_R + 0.055, 1.12), 0.13, 0.10, 0.27, 0.02, 0.012, "black")
+    m.add([(0.05, POLE_R + 0.106, 1.04), (-0.05, POLE_R + 0.106, 1.04), (-0.05, POLE_R + 0.106, 1.20),
+           (0.05, POLE_R + 0.106, 1.20)], [[0, 2, 1], [0, 3, 2]], cell_uv("button", [0, 1, 1, 0], [0, 0, 1, 1]),
+          two_sided=True)
     return m.out()
 
 

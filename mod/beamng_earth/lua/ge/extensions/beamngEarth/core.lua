@@ -1866,6 +1866,8 @@ M.onUiChangedState = onUiChangedState
 M.onClientStartMission = onClientStartMission
 M.onClientPreStartMission = onClientPreStartMission
 M.onNavgraphReloaded = function() navgraph.onReloaded() end
+-- (a kunstwerk's crossing heads: the inverse of their approach's light, navgraph.onSignalUpdate)
+M.onTrafficSignalUpdate = function(results) navgraph.onSignalUpdate(results) end
 M.onVehicleMapmgrUpdate = function(id) gps.onVehicleMapmgrUpdate(id) end
 M.onClientEndMission = onClientEndMission
 M.onClientPostStartMission = onClientPostStartMission

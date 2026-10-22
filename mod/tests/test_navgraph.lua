@@ -76,5 +76,36 @@ do
   T.check(made[2].shape == '/k.cdae' and made[3].shape == N.SIGNAL_SHAPE, 'each its shape (the stock one if none)')
   N.makeHead(inst, a)
   T.check(#made == 3, 'made again: the heads already standing are kept')
+
+  -- a crossing's heads (e[6] 'inv'): unlinked objects, the inverse of the approach's light
+  local plain = {}
+  local orig = N.plainObject
+  N.plainObject = function(shape, pos)
+    local o = { shape = shape, pos = pos, id = 100 + #plain, fields = {}, setTransform = function() end,
+                delete = function() end, getID = function(self) return self.id end,
+                setField = function(self, k, _, v) self.fields[k] = v end }
+    plain[#plain + 1] = o
+    objs[o.id] = o
+    return o
+  end
+  local b = { 'c2', 0, 0, 0, 1, 0, 0, nil, nil, nil, nil, nil, { { 3, 4, 2.4, 0, '/ped.cdae', 'inv' } } }
+  local inst2 = { name = 'bne_j_2', createSignalObject = inst.createSignalObject }
+  N.makeHead(inst2, b)
+  T.check(#plain == 1 and #made == 3 and plain[1].shape == '/ped.cdae', 'an inverse head: a plain object, not linked')
+  N.onSignalUpdate({ bne_j_2 = { state = 'greenTrafficLight', lightStates = { false, false, true } } })
+  T.check(plain[1].fields.instanceColor == '1 1 1 1' and plain[1].fields.instanceColor2 == '0 0 0 1',
+    'its approach green: the crossing red')
+  N.onSignalUpdate({ bne_j_2 = { state = 'yellowTrafficLight', lightStates = { false, true, false } } })
+  T.check(plain[1].fields.instanceColor == '1 1 1 1', 'amber: still red')
+  N.onSignalUpdate({ bne_j_2 = { state = 'redTrafficLight', lightStates = { true, false, false } } })
+  T.check(plain[1].fields.instanceColor == '0 0 0 1' and plain[1].fields.instanceColor2 == '1 1 1 1',
+    'its approach red: the crossing green')
+  N.onSignalUpdate({ bne_j_2 = { state = 'redYellowTrafficLight', lightStates = { true, true, false } } })
+  T.check(plain[1].fields.instanceColor == '1 1 1 1', 'red and amber (about to go): red again')
+  N.onSignalUpdate({ bne_j_2 = { state = 'none' } })
+  T.check(plain[1].fields.instanceColor == '0 0 0 1' and plain[1].fields.instanceColor2 == '0 0 0 1', 'none: dark')
+  N.onSignalUpdate({ bne_j_1 = { state = 'redTrafficLight', lightStates = { true, false, false } } })
+  T.check(plain[1].fields.instanceColor2 == '0 0 0 1', 'another instance\'s update leaves it')
+  N.plainObject = orig
 end
 T.done('test_navgraph')

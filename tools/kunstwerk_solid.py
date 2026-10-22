@@ -1424,6 +1424,17 @@ def main(argv=None):
                                                              plates=it["plates"], head=False))
         elif it["module"] == "traffic_light":
             mod = modules[("traffic_light", bool(it.get("bike")))]
+        elif it["module"] == "crossing_light":
+            # a signalled crossing's pole (tools/kunstwerk_placement.py crossing_lights), its heads the game's: the
+            # pedestrians' at the top looking across the road, the cyclists' under it looking at those arriving here;
+            # each the inverse of the road it crosses (server kunstwerken.hide_heads, "crossing", "across")
+            ped = any(h["kind"] == "ped" for h in it["heads"])
+            mod = modules.setdefault(("crossing", ped), kit.crossing_pole(ped=ped))
+            for h in it["heads"]:
+                hz_ = kit.PED_HEAD_Z if h["kind"] == "ped" else kit.BIKE_HEAD_Z
+                heads.append({"at": [round(float(q[0]), 3), round(float(q[1]), 3), round(ground_z(q) + hz_, 3)],
+                              "facing": [round(float(v), 4) for v in h["facing"]], "crossing": h["kind"],
+                              "across": h["across"]})
         else:
             code = it["code"] if isinstance(it["code"], str) else tuple(it["code"])     # (a post's plates: a list)
             mod = modules.setdefault(("sign", code), kit.sign(code))

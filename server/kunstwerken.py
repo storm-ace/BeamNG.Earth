@@ -127,8 +127,12 @@ class Kunstwerk:
         self.signals = [(np.asarray(s["at"], np.float64), np.asarray(s["facing"], np.float64))
                         for s in data.get("signals", ())]
         # "bike": a cyclists' head under the head before it on its pole; "cycle": a cycle path's light alone
-        self.signal_kinds = ["bike" if s.get("bike") else "cycle" if s.get("cycle") else ""
-                             for s in data.get("signals", ())]
+        # "cross_ped" / "cross_bike": a signalled crossing's pedestrians' / cyclists' head, "across": the axis of the
+        # road it crosses (it shows the inverse of that road's traffic: hide_heads)
+        self.signal_kinds = ["cross_" + s["crossing"] if s.get("crossing") else "bike" if s.get("bike")
+                             else "cycle" if s.get("cycle") else "" for s in data.get("signals", ())]
+        self.signal_across = [np.asarray(s["across"], np.float64) if s.get("across") else None
+                              for s in data.get("signals", ())]
         self.wires = [np.asarray(w, np.float64) for w in data.get("wires", ()) if len(w) >= 2]    # (its overhead line)
         fl = data.get("floor")
         if fl:
@@ -476,10 +480,19 @@ def hide_heads(frame, signals, graph=None, mapped=None):
     kws = all_kunstwerken()
     if not kws:
         return signals
-    heads, bikes, cycle = [], {}, set()
+    heads, bikes, cycle, crossing = [], {}, set(), []
     for k in kws:
         hs = k.heads(frame)
-        for h, kind in zip(hs, (list(getattr(k, "signal_kinds", ())) + [""] * len(hs))[:len(hs)]):
+        kinds = (list(getattr(k, "signal_kinds", ())) + [""] * len(hs))[:len(hs)]
+        acr = (list(getattr(k, "signal_across", ())) + [None] * len(hs))[:len(hs)]
+        for i, (h, kind) in enumerate(zip(hs, kinds)):
+            if kind.startswith("cross_"):       # (a crossing's head: its road's axis turned as its facing was)
+                f_rd = np.asarray(k.signals[i][1], np.float64)
+                rot = math.atan2(h[4], h[3]) - math.atan2(f_rd[1], f_rd[0])
+                ax = acr[i] if acr[i] is not None else np.array([-f_rd[1], f_rd[0]])
+                c, s_ = math.cos(rot), math.sin(rot)
+                crossing.append((h, kind[6:], (c * ax[0] - s_ * ax[1], s_ * ax[0] + c * ax[1])))
+                continue
             if kind == "bike" and heads:        # (a cyclists' head under the one before it, on its pole)
                 bikes[id(heads[-1])].append(h)
                 continue
@@ -492,7 +505,7 @@ def hide_heads(frame, signals, graph=None, mapped=None):
     ours = [signals[i]["app"][j] for (i, j), h in zip(spots, hit) if h]
     for a in ours:
         a[7:] = [None] * 4
-    if not heads:
+    if not heads and not crossing:
         return signals
     n_app = n_made = n_side = 0
     left = []
@@ -576,9 +589,62 @@ def hide_heads(frame, signals, graph=None, mapped=None):
             continue
         _give(best[1], h, bikes[id(h)])
         n_side += 1
+    n_cross, n_lost = _crossing_heads(crossing, ours, jxy)
     log.info("kunstwerk heads: %d of %d on the graph's signalled approaches, %d on approaches made for them, %d "
-             "beside a parallel one (cyclists), %d on none", n_app, len(heads), n_made, n_side, len(rest))
+             "beside a parallel one (cyclists), %d on none; crossings: %d of %d heads the inverse of the road they "
+             "cross, %d on none", n_app, len(heads), n_made, n_side, len(rest), n_cross, len(crossing), n_lost)
     return signals
+
+
+HEAD_SHAPE_PED = "/levels/beamng_earth/art/shapes/beamngEarth/bne_nl_signal_ped.cdae"   # (a crossing's pedestrians')
+ALONG_ROAD = 0.7            # cos: an approach this near a crossing's road axis drives that road
+CROSS_REACH_M = (-12.0, 45.0)   # m: a crossing this far past an approach's stop point (behind: -) is on its way
+CROSS_ACROSS_M = 15.0       # m a crossing's head stands at most beside the line of the approach whose road it crosses
+
+
+def _crossing_heads(crossing, ours, jxy=None):
+    """A signalled crossing's heads (kunstwerk_placement.crossing_lights: its pedestrians' and cyclists') show the
+    inverse of the traffic on the road they cross: green while that road's approach stands at red, red while it has
+    green or amber (navgraph.lua: an "inv" head of its instance; the junction's two phases split by axis make that the
+    phase of the roads beside the crossing). The approach: of those driving along the road crossed (ALONG_ROAD) the
+    one whose stop point lies before the crossing (CROSS_REACH_M along its traffic, CROSS_ACROSS_M beside its line), the
+    nearest; else (a crossing of a junction's way out: no approach drives over it first) the nearest driving along
+    that road either way, or its junction, within ATTACH_M (that axis's phase). The simple rule (the user's, 2026-10-22):
+    no turning traffic's own conflicts, no early green for the pedestrians. Returns (heads given, heads left)."""
+    jxy = jxy or {}
+    n, lost = 0, 0
+    for h, kind, ax in crossing:
+        x, y, z, fx, fy = h
+        ax = np.asarray(ax, np.float64)
+        best = None
+        for a in ours:
+            inc = np.asarray(a[4:6], np.float64)
+            if abs(float(inc @ ax)) < ALONG_ROAD:
+                continue
+            q = np.array([x - a[1], y - a[2]])
+            along, lat = float(q @ inc), abs(float(inc[0] * q[1] - inc[1] * q[0]))
+            if CROSS_REACH_M[0] <= along <= CROSS_REACH_M[1] and lat <= CROSS_ACROSS_M:
+                key = (0, lat + 0.3 * abs(along))
+            else:
+                d = math.hypot(*q)
+                if id(a) in jxy:
+                    d = min(d, math.hypot(x - jxy[id(a)][0], y - jxy[id(a)][1]))
+                if d > ATTACH_M:
+                    continue
+                key = (1, d)
+            if best is None or key < best[0]:
+                best = (key, a)
+        if best is None:
+            lost += 1
+            continue
+        a = best[1]
+        while len(a) < 12:
+            a.append(None)
+        if len(a) < 13:
+            a.append([])
+        a[12].append(_head_rec(h, HEAD_SHAPE_PED if kind == "ped" else HEAD_SHAPE_BIKE) + ["inv"])
+        n += 1
+    return n, lost
 
 
 CAP_M = 0.15                # m the terrain is kept under a kunstwerk's floor
