@@ -101,14 +101,34 @@ class FootprintTest(unittest.TestCase):
         e, n, _ = self.frame.geodetic_to_enu(*self.ll([0.0, 40.0], [0.0, 0.0]), 0.0)
         on, off = [float(e[0]), float(n[0])], [float(e[1]), float(n[1])]
         self.assertEqual(kunstwerken.keep_out(self.frame, [on, off]).tolist(), [True, False])
-        app = lambda p: ["c1", 0.0, 0.0, 0.0, 1.0, 0.0, 0] + p + [0.5, 90.0]     # noqa: E731
-        sig = [{"j": "n1", "kind": "signal", "app": [app(on), app(off), ["c2", 0, 0, 0, 1, 0, 1, None, None, None, None]]}]
+        app = lambda p: ["c1"] + p + [0.0, 1.0, 0.0, 0] + p + [0.5, 90.0]     # noqa: E731  (stop point, head at p)
+        sig = [{"j": "n1", "kind": "signal", "app": [app(on), app(off), ["c2"] + off + [0, 1, 0, 1, None, None, None, None]]}]
         kunstwerken.hide_heads(self.frame, sig)
         a = sig[0]["app"]
-        self.assertEqual(a[0][7:], [None] * 4, "no stock boom in its footprint")
+        self.assertEqual(a[0][7:], [None] * 4, "no stock boom in its footprint (it has no heads of its own)")
         self.assertEqual(a[0][:7], app(on)[:7], "the approach still holds the AI")
         self.assertEqual(a[1][7:9], off, "elsewhere as before")
         self.assertIsNone(a[2][7])
+
+    def test_its_own_head_for_an_approach(self):
+        """An approach in its footprint gets the kunstwerk's head that looks at its traffic, nearest its stop point,
+        with its Dutch shape; one looking the other way is not it."""
+        self.k.signals = [(np.array([3.0, -2.0, 4.2]), np.array([-1.0, 0.0])),     # looks west: at eastbound traffic? no
+                          (np.array([4.0, 2.0, 4.2]), np.array([-1.0, 0.0])),      # looks west
+                          (np.array([-4.0, 2.0, 4.2]), np.array([1.0, 0.0]))]      # looks east
+        e, n, _ = self.frame.geodetic_to_enu(*self.ll([2.0], [0.0]), 0.0)
+        stop = [float(e[0]), float(n[0])]
+        # westbound traffic (travel -x) arriving at a stop point 2 m east of the middle: the heads looking east face it
+        a = ["c1"] + stop + [0.0, -1.0, 0.0, 0, None, None, None, None]
+        kunstwerken.hide_heads(self.frame, [{"j": "n1", "kind": "signal", "app": [a]}])
+        he, hn, _ = self.frame.geodetic_to_enu(*self.ll([-4.0], [2.0]), 0.0)
+        self.assertAlmostEqual(a[7], float(he[0]), places=1)
+        self.assertAlmostEqual(a[8], float(hn[0]), places=1)
+        self.assertAlmostEqual(a[9], 4.2, places=1)
+        self.assertEqual(a[11], kunstwerken.HEAD_SHAPE)
+        yaw = np.radians(a[10])         # its local +x along (fy, -fx) = (0, -1) for a head looking east: yaw 270
+        self.assertAlmostEqual(float(np.cos(yaw)), 0.0, places=1)
+        self.assertAlmostEqual(float(np.sin(yaw)), -1.0, places=1)
 
 
 if __name__ == "__main__":

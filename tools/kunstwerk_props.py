@@ -218,9 +218,19 @@ def _stadium_face(m, x, y, zc, w, h, cell, seg=12):
           cell_uv(cell, np.r_[0.5, uv[:, 0]], np.r_[0.5, uv[:, 1]]), two_sided=True)
 
 
-def _head(m, y_back, zc, scale=1.0, x=0.0):
+def head_lenses(scale=1.0):
+    """The three lenses' heights relative to the head's middle (red, amber, green) and their radius."""
+    w, d, h = (v * scale for v in HEAD)
+    lr = LENS_R * scale
+    pitch = (h - 0.07 * scale - 2 * lr - 0.12 * scale) / 2
+    top = (h - 0.07 * scale) / 2 - lr - 0.03 * scale
+    return [top - i * pitch for i in range(3)], lr
+
+
+def _head(m, y_back, zc, scale=1.0, x=0.0, lenses=True):
     """A Rotterdam three-lens head facing +y (its back at y_back, its middle at height zc): a black stadium body, the
-    white contrast rim round its face, three lenses flush in it (no hoods), its number plate under the lowest."""
+    white contrast rim round its face, three lenses flush in it (no hoods), its number plate under the lowest.
+    lenses=False: their bezels only (tools/nl_signal_head.py puts the game's switchable lenses in them)."""
     w, d, h = (v * scale for v in HEAD)
     yf = y_back + d
     _stadium(m, x, y_back, yf, zc, w, h, "black")
@@ -232,7 +242,8 @@ def _head(m, y_back, zc, scale=1.0, x=0.0):
     for i, cell in enumerate(("lens_red", "lens_amber", "lens_green")):
         z = top - i * pitch
         m.annulus_y(x, yf + 0.005, z, lr, lr + 0.012 * scale, "black", depth=0.002)
-        m.disc_y(x, yf + 0.004, z, lr, cell, bulge=0.006 * scale)
+        if lenses:
+            m.disc_y(x, yf + 0.004, z, lr, cell, bulge=0.006 * scale)
     zl = top - 2 * pitch - lr - 0.045 * scale
     m.add([(x + 0.035 * scale, yf + 0.004, zl - 0.018 * scale), (x - 0.035 * scale, yf + 0.004, zl - 0.018 * scale),
            (x - 0.035 * scale, yf + 0.004, zl + 0.018 * scale), (x + 0.035 * scale, yf + 0.004, zl + 0.018 * scale)],
@@ -252,10 +263,28 @@ def _plate_only(code):
     return Q, remap[keep_t], UV[used]
 
 
-def traffic_light(bike=False, button=True, plates=()):
+def head_mount():
+    """(y of the head's back, height of its middle) on traffic_light()'s pole: where its switchable head goes."""
+    return POLE_R + 0.03, POLE_H - HEAD[2] / 2 - 0.02
+
+
+def signal_head(lenses=True):
+    """traffic_light()'s head alone with its clamps, its frame on the pole's axis at the head's middle."""
+    m = Mesh()
+    yb, _ = head_mount()
+    _head(m, yb, 0.0, lenses=lenses)
+    for z in (HEAD[2] / 2 - 0.15, -HEAD[2] / 2 + 0.15):
+        m.lathe([(POLE_R + 0.008, z - 0.03), (POLE_R + 0.008, z + 0.03)], "black", seg=16, cap_top=True,
+                cap_bottom=True)
+        m.bar((0, 0.0, z), (0, POLE_R + 0.04, z), 0.06, 0.04, "black")
+    return m.out()
+
+
+def traffic_light(bike=False, button=True, plates=(), head=True):
     """The low signal: the ringed pole, the head at its top on its side facing +y, a cyclists' head lower down and the
     request button as options; plates: signs (codes) clamped to the same pole under the head, facing the same way
-    (Rotterdam's give-way triangle under the light, Street View 2026-10-22)."""
+    (Rotterdam's give-way triangle under the light, Street View 2026-10-22). head=False: the pole without its head
+    (the game puts its switchable one there: signal_head, head_mount)."""
     m = Mesh()
     z_top = POLE_H - HEAD[2] - 0.15
     for code in plates:
@@ -269,11 +298,12 @@ def traffic_light(bike=False, button=True, plates=()):
     _pole(m, POLE_R, POLE_H)
     w, d, h = HEAD
     zc = POLE_H - h / 2 - 0.02
-    _head(m, POLE_R + 0.03, zc)
-    for z in (zc + h / 2 - 0.15, zc - h / 2 + 0.15):              # its two clamps
-        m.lathe([(POLE_R + 0.008, z - 0.03), (POLE_R + 0.008, z + 0.03)], "black", seg=16, cap_top=True,
-                cap_bottom=True)
-        m.bar((0, 0.0, z), (0, POLE_R + 0.04, z), 0.06, 0.04, "black")
+    if head:
+        _head(m, POLE_R + 0.03, zc)
+        for z in (zc + h / 2 - 0.15, zc - h / 2 + 0.15):              # its two clamps
+            m.lathe([(POLE_R + 0.008, z - 0.03), (POLE_R + 0.008, z + 0.03)], "black", seg=16, cap_top=True,
+                    cap_bottom=True)
+            m.bar((0, 0.0, z), (0, POLE_R + 0.04, z), 0.06, 0.04, "black")
     if bike:
         _head(m, POLE_R + 0.03, 1.75, scale=0.55)
     if button:
@@ -543,8 +573,12 @@ def lamp_post(h=8.0, arm=1.6):
     return m.out()
 
 
+TRAM_POLE_ARM_Z = 7.5 - 0.75    # m: tram_pole()'s cantilever tip over its foot (the span wire hangs from it)
+
+
 def tram_pole(reach=2.5, h=7.5):
-    """A tram line's mast: a grey pole and its cantilever out toward +y over the track (the wire left out)."""
+    """A tram line's mast: a grey pole and its cantilever out toward +y over the track (the wire: tools/kunstwerk_solid.py,
+    render-only)."""
     m = Mesh()
     m.lathe([(0.16, 0.0), (0.16, 0.03), (0.1, 0.03), (0.1, 0.5), (0.08, h)], "grey", seg=12)
     m.lathe([(0.08, h), (0.001, h + 0.04)], "grey", seg=12)

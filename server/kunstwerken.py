@@ -15,6 +15,7 @@ tris, materials (the game's), tri_material, decks [{ring (k, 2) RD metres from t
 import glob
 import json
 import logging
+import math
 import os
 import threading
 
@@ -85,6 +86,11 @@ class Kunstwerk:
         self.tm = np.asarray(data["tri_material"], np.int64)
         self.decks = [(np.asarray(d["ring"], np.float64), np.asarray(d["plane"], np.float64)) for d in data.get("decks", ())]
         self.UV = np.asarray(data["uvs"], np.float64) if "uvs" in data else None
+        # its traffic lights' heads (tools/kunstwerk_export.py): the middle of each, RD metres from the origin and NAP,
+        # and the way it looks; the game switches them (hide_heads)
+        self.signals = [(np.asarray(s["at"], np.float64), np.asarray(s["facing"], np.float64))
+                        for s in data.get("signals", ())]
+        self.wires = [np.asarray(w, np.float64) for w in data.get("wires", ()) if len(w) >= 2]    # (its overhead line)
         fl = data.get("floor")
         if fl:
             self.floor = np.asarray(fl["z"], np.float64).reshape(fl["ny"], fl["nx"])
@@ -113,6 +119,49 @@ class Kunstwerk:
             e, n, u = frame.geodetic_to_enu(la, lo, self.P[:, 2])
             got = self._enu[key] = np.c_[np.asarray(e), np.asarray(n), np.asarray(u)]
         return got
+
+    def heads(self, frame):
+        """Its signal heads in the frame: [(x, y, z, facing x, facing y)]."""
+        if not self.signals:
+            return []
+        import ahn
+        at = np.array([s[0] for s in self.signals])
+        f = np.array([s[1] for s in self.signals])
+        f = f / np.maximum(np.hypot(f[:, 0], f[:, 1]), 1e-9)[:, None]
+        la, lo = ahn.rd_to_wgs(at[:, 0] + self.origin[0], at[:, 1] + self.origin[1])
+        e, n, u = frame.geodetic_to_enu(la, lo, at[:, 2])
+        la2, lo2 = ahn.rd_to_wgs(at[:, 0] + f[:, 0] + self.origin[0], at[:, 1] + f[:, 1] + self.origin[1])
+        e2, n2, _ = frame.geodetic_to_enu(la2, lo2, at[:, 2])
+        de, dn = np.asarray(e2) - np.asarray(e), np.asarray(n2) - np.asarray(n)
+        h = np.maximum(np.hypot(de, dn), 1e-9)
+        return [(float(a), float(b), float(c), float(x), float(y))
+                for a, b, c, x, y in zip(np.atleast_1d(e), np.atleast_1d(n), np.atleast_1d(u), de / h, dn / h)]
+
+    def tile_wires(self, frame, box):
+        """Its overhead wires' pieces whose segments' middles lie in the box (x0, y0, x1, y1), as the frame's
+        polylines (k, 3) (the road tiles' utility wires: furniture.wire_mesh, render-only); each segment in one tile."""
+        if not self.wires:
+            return []
+        import ahn
+        x0, y0, x1, y1 = box
+        out = []
+        for w in self.wires:
+            la, lo = ahn.rd_to_wgs(w[:, 0] + self.origin[0], w[:, 1] + self.origin[1])
+            e, n, u = frame.geodetic_to_enu(la, lo, w[:, 2])
+            p = np.c_[np.atleast_1d(e), np.atleast_1d(n), np.atleast_1d(u)]
+            mid = (p[:-1] + p[1:]) / 2
+            ins = (mid[:, 0] >= x0) & (mid[:, 0] < x1) & (mid[:, 1] >= y0) & (mid[:, 1] < y1)
+            i = 0
+            while i < len(ins):
+                if not ins[i]:
+                    i += 1
+                    continue
+                j = i
+                while j + 1 < len(ins) and ins[j + 1]:
+                    j += 1
+                out.append(p[i:j + 2])
+                i = j + 1
+        return out
 
     def over(self, frame, box):
         """Does it reach into the box (x0, y0, x1, y1) in the frame?"""
@@ -254,16 +303,43 @@ def keep_out(frame, xy, kws=None):
     return in_footprint(la, lo, kws)
 
 
+HEAD_SHAPE = "/levels/beamng_earth/art/shapes/beamngEarth/bne_nl_signal.cdae"     # tools/nl_signal_head.py
+HEAD_REACH_M = 30.0         # m from an approach's stop point a kunstwerk's head for it may stand
+HEAD_FACING = 0.6           # ... looking at its traffic within ~53 degrees
+
+
 def hide_heads(frame, signals):
-    """navgraph's signals with no switchable head (the stock boom, navgraph.lua) in a kunstwerk's footprint: its own
-    signals stand there (the generator's boom stood in its lanes, 2026-10-22); the phases still hold the AI."""
-    spots = [(i, j) for i, s in enumerate(signals) for j, a in enumerate(s["app"]) if a[7] is not None]
+    """navgraph's signals in a kunstwerk's footprint (their stop points): each approach's switchable head is the
+    kunstwerk's own head that looks at its traffic nearest its stop point (its pole carries no head of its own: the
+    game puts HEAD_SHAPE there and switches it, navgraph.lua), else none (the stock boom stood in its lanes,
+    2026-10-22); the phases hold the AI either way. Its lights stood dead before: their heads were part of its mesh."""
+    spots = [(i, j) for i, s in enumerate(signals) for j, a in enumerate(s["app"])]
     if not spots or not all_kunstwerken():
         return signals
-    hit = keep_out(frame, [signals[i]["app"][j][7:9] for i, j in spots])
+    hit = keep_out(frame, [signals[i]["app"][j][1:3] for i, j in spots])
+    heads = [h for k in all_kunstwerken() for h in k.heads(frame)]
+    used = set()
     for (i, j), h in zip(spots, hit):
-        if h:
-            signals[i]["app"][j][7:11] = [None] * 4
+        if not h:
+            continue
+        a = signals[i]["app"][j]
+        q, inc = np.asarray(a[1:3], np.float64), np.asarray(a[4:6], np.float64)
+        best = None
+        for n, (x, y, z, fx, fy) in enumerate(heads):
+            d = float(np.hypot(x - q[0], y - q[1]))
+            if -(fx * inc[0] + fy * inc[1]) >= HEAD_FACING and d <= HEAD_REACH_M:
+                key = (n in used, d)            # (a head not yet given to another approach first)
+                if best is None or key < best[0]:
+                    best = (key, n)
+        if best is None:
+            a[7:11] = [None] * 4
+            continue
+        n = best[1]
+        used.add(n)
+        x, y, z, fx, fy = heads[n]
+        # (navgraph.lua turns the head by -yaw: the yaw that takes its local +x to (fy, -fx) faces its +y along f)
+        a[7:11] = [round(x, 2), round(y, 2), round(z, 2), round(math.degrees(math.atan2(-fx, fy)) % 360.0, 1)]
+        a[11:] = [HEAD_SHAPE]
     return signals
 
 

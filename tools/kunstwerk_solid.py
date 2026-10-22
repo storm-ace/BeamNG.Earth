@@ -58,6 +58,9 @@ DIP_GRADE = 0.04        # the steepest the floor dips to it
 BLUR_M = 0.7            # m: the plan's rounding
 LAMP_H = 8.0
 TRAM_POLE_M = 3.5       # m: a light mast this near a tram track is the tram line's
+CONTACT_Z = 5.8         # m: the tram's contact wire over its rails (RET: 5.5-6.0)
+CONTACT_SPAN_M = 30.0   # m between its supports
+CONTACT_SAG = 0.004     # its sag per metre of span
 STOP_W = (0.2, 0.45)    # m: a stop line's width
 STOP_L = (2.4, 16.0)    # m: and its length (a lane or more)
 STOP_REACH = 45.0       # m: at most this from its junction's signals
@@ -83,8 +86,13 @@ GRASS, ROAD = 0, len(KINDS) - 1
 TRENCH = len(KINDS)     # a triangle in a carriageway's strip
 
 
+PLATFORM_HALF_W = 1.4       # m: a tram platform mapped as a line (OSM's railway=platform way) is this wide either side
+
+
 def osm_platforms(ref):
-    """OSM's tram platforms (ref/osm_map.xml: closed highway=platform ways) as plan features of the kind "perron"."""
+    """OSM's tram platforms (ref/osm_map.xml) as plan features of the kind "perron": closed ways as they are, a line
+    (Euromast's two: railway=platform, public_transport=platform; only closed highway=platform ways were read and the
+    stop had no platform, 2026-10-22) PLATFORM_HALF_W either side of it."""
     import xml.etree.ElementTree as ET
     path = os.path.join(REF_DIR[0], "osm_map.xml") if REF_DIR else None
     if not path or not os.path.exists(path):
@@ -98,12 +106,25 @@ def osm_platforms(ref):
     for w in root.findall("way"):
         tags = {t.get("k"): t.get("v") for t in w.findall("tag")}
         refs = [nd.get("ref") for nd in w.findall("nd")]
-        if tags.get("highway") != "platform" or len(refs) < 4 or refs[0] != refs[-1]:
+        if not (tags.get("highway") == "platform" or tags.get("railway") == "platform"
+                or tags.get("public_transport") == "platform") or len(refs) < 2 or tags.get("bus") == "yes":
             continue
-        ring = []
+        pts = []
         for r_ in refs:
+            if r_ not in nodes:
+                continue
             x, y = ahn.wgs_to_rd(float(nodes[r_].get("lat")), float(nodes[r_].get("lon")))
-            ring.append([x - o[0], y - o[1]])
+            pts.append([x - o[0], y - o[1]])
+        if len(pts) < 2:
+            continue
+        if refs[0] == refs[-1] and len(pts) >= 4:
+            ring = pts
+        else:
+            p = np.asarray(pts, np.float64)
+            d = np.diff(p, axis=0)
+            t = np.r_[d[:1], d[:-1] + d[1:], d[-1:]]   # (each vertex's tangent: its segments' mean)
+            nrm = np.c_[-t[:, 1], t[:, 0]] / np.maximum(np.hypot(t[:, 0], t[:, 1]), 1e-9)[:, None]
+            ring = np.r_[p + nrm * PLATFORM_HALF_W, (p - nrm * PLATFORM_HALF_W)[::-1]].tolist()
         out.append({"layer": "wegdeel", "functie": "perron", "level": 0, "rings": [ring]})
     return out
 
@@ -132,7 +153,8 @@ class Plan:
         feats = [f for f in ref["features"] if f["layer"] in ("wegdeel", "ondersteunendwegdeel") and f["level"] >= 0
                  and kind_key(f) in by_fn]
         feats += osm_platforms(ref)
-        feats.sort(key=lambda f: by_fn[kind_key(f)])
+        # (a platform last: it stands on the tram's paved bed, which is road, and was painted over by it)
+        feats.sort(key=lambda f: (kind_key(f) == "perron", by_fn[kind_key(f)]))
         for f in feats:
             k = by_fn[kind_key(f)]
             for ring in f["rings"][:1]:
@@ -856,8 +878,18 @@ def main(argv=None):
             items[i].update({k: v for k, v in fx.items() if k not in ("action", "why", "near")})
     if not items:
         print(f"street furniture: no {pl_path} (tools/kunstwerk_placement.py): no lights or signs")
-    modules = {("traffic_light", False): kit.traffic_light(button=False),
-               ("traffic_light", True): kit.traffic_light(bike=True, button=True)}
+    # a low light's pole without its head: the game puts its switchable Dutch head there (tools/nl_signal_head.py,
+    # server kunstwerken.hide_heads; the heads in the mesh never changed colour, in game 2026-10-22)
+    modules = {("traffic_light", False): kit.traffic_light(button=False, head=False),
+               ("traffic_light", True): kit.traffic_light(bike=True, button=True, head=False)}
+    heads = []
+    hy, hz = kit.head_mount()
+
+    def head_at(q, f_):
+        f_ = f_ / max(np.hypot(*f_), 1e-9)
+        c = q + f_ * hy                                 # (the module's +y is its face: its head that far out)
+        heads.append({"at": [round(float(c[0]), 3), round(float(c[1]), 3), round(ground_z(q) + hz, 3)],
+                      "facing": [round(float(f_[0]), 4), round(float(f_[1]), 4)]})
     count = {}
     for it in items:
         q = np.asarray(it["at"], np.float64)
@@ -872,13 +904,15 @@ def main(argv=None):
         elif it["module"] == "traffic_light" and it.get("plates"):
             key = ("traffic_light", bool(it.get("bike")), tuple(it["plates"]))
             mod = modules.setdefault(key, kit.traffic_light(bike=bool(it.get("bike")), button=False,
-                                                             plates=it["plates"]))
+                                                             plates=it["plates"], head=False))
         elif it["module"] == "traffic_light":
             mod = modules[("traffic_light", bool(it.get("bike")))]
         else:
             mod = modules.setdefault(("sign", it["code"]), kit.sign(it["code"]))
         f_ = np.asarray(it["facing"], np.float64)
         put(mod, q, np.arctan2(f_[1], f_[0]))
+        if it["module"] == "traffic_light" and not it.get("mast"):
+            head_at(q, f_)
         key = it.get("code") or it["role"]
         count[key] = count.get(key, 0) + 1
     # the direction signs read off Street View (ref/direction_signs.json: each its module, its arguments, its place
@@ -945,10 +979,41 @@ def main(argv=None):
         put(lamp_mod, p, best[1] if best else 0.0)
         n_lamp += 1
     print(f"light masts: {n_lamp} street lights, {n_tpole} tram masts")
+    # the tram's overhead line (none was drawn, the user 2026-10-22: "de stroomkabels lijken niet aanwezig"): over each
+    # track at grade in the area a contact wire CONTACT_Z over its rails, sagging between supports CONTACT_SPAN_M apart,
+    # and from each tram mast's arm tip a span wire to the track it serves. Render-only (the server's wires: thin
+    # ribbons, no collision), so not in the mesh
+    wires = []
+    mast_tips = []
+    for f in ref["features"]:
+        if f["layer"] != "paal" or f.get("functie") != "lichtmast":
+            continue
+        p = np.asarray(f["rings"][0][0], np.float64).reshape(-1)[:2]
+        dt = np.hypot(*(TP - p).T) if len(TP) else np.array([np.inf])
+        if dt.min() < TRAM_POLE_M and in_area(*p[:, None]).all():
+            mast_tips.append((p, TP[np.argmin(dt)]))
+    for tr in tracks:
+        keep = in_area(*tr.T) & (in_trench(*tr.T) < 0)
+        for r0, r1 in runs_of(keep):
+            seg = tr[r0:r1 + 1]
+            if len(seg) < 5:
+                continue
+            s = np.r_[0.0, np.cumsum(np.hypot(*np.diff(seg, axis=0).T))]
+            z = np.array([ground_z(q) for q in seg]) + CONTACT_Z
+            ph = (s % CONTACT_SPAN_M) / CONTACT_SPAN_M
+            z -= 4.0 * CONTACT_SAG * min(CONTACT_SPAN_M, s[-1]) * ph * (1.0 - ph)
+            wires.append(np.c_[seg, z].round(3).tolist())
+    for p, near in mast_tips:
+        top = ground_z(p) + kit.TRAM_POLE_ARM_Z
+        d = near - p
+        tip = p + d / max(np.hypot(*d), 1e-9) * min(2.5, float(np.hypot(*d)))
+        wires.append([[*map(float, tip), top], [*map(float, near), ground_z(near) + CONTACT_Z]])
+    print(f"overhead line: {len(wires) - len(mast_tips)} contact wire runs, {len(mast_tips)} span wires")
 
     # --- out
     out = {"origin_rd": ref["origin_rd"], "origin_wgs": ref["origin_wgs"],
-           "parts": [welded(p.out()) for p in parts.values() if p.out()]}
+           "parts": [welded(p.out()) for p in parts.values() if p.out()], "signals": heads, "wires": wires}
+    print(f"switchable signal heads: {len(heads)}")
     base = os.path.dirname(os.path.abspath(a.ref))
     json.dump(out, open(os.path.join(base, "parts.json"), "w"))
     decks_out = []
@@ -990,7 +1055,9 @@ def wall_run(part, a, b, z0, z1, uv_m=1.0):
     z0, z1 = np.asarray(z0, np.float64), np.asarray(z1, np.float64)
     k = len(a)
     s = np.r_[0, np.cumsum(np.hypot(*np.diff((a + b) / 2, axis=0).T))]
-    side = np.sign(np.cross(a[-1] - a[0] if k > 1 else np.array([1.0, 0]), b[0] - a[0])) or 1.0
+    u_ = a[-1] - a[0] if k > 1 else np.array([1.0, 0])
+    v_ = b[0] - a[0]
+    side = np.sign(u_[0] * v_[1] - u_[1] * v_[0]) or 1.0     # (2-D cross: np.cross refuses 2-D vectors from numpy 2.3)
 
     def strip(L, za, zb_, flip):
         P = np.r_[np.c_[L, za], np.c_[L, zb_]]

@@ -457,6 +457,9 @@ def roads_tile(aid, lat, lon, zoom, tx, ty, out_dir, vfs_dir, sidewalks, lift, b
                     props[:] = [r for r, o in zip(props, out) if not o]
             if kws and wires:           # (nor our utility wires over it: their poles are props, gone above)
                 wires[:] = [w for w in wires if not kwmod.keep_out(frame, np.asarray(w)[:, :2], kws).any()]
+            if kws and wires is not None:   # its own: the tram's overhead line
+                for k in kws:
+                    wires.extend(k.tile_wires(frame, box))
         except Exception as e:
             log.warning("bgt walls / lamps of tile %s_%s: %s: %s", tx, ty, type(e).__name__, e)
         if kws:                     # where a kunstwerk draws its streets, nothing of ours over them (its rails, paint)

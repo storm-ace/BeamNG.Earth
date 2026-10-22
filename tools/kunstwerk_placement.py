@@ -40,7 +40,9 @@ PAST_LINE_M = 0.8       # m a primary light stands past its stop line
 OSM_MATCH_M = 15.0      # m: a primary this near an OSM signal, facing its way's traffic, is that signal's
 MEDIAN_MIN_M = 1.5      # m: a strip off the road this wide on the lanes' left (a median, an island, the tram's grass)
                         # carries their mast, its arm over them to the right (Street View A269, B20)
-MAST_LANES = 3          # lanes in (OSM's lanes) from which the primary is a mast with an arm over them
+FOOT_R = 0.25           # m round a pole's foot that must all be ground it may stand on (not road, cycle path, tram)
+SETTLE_M = 3.0          # m a pole is moved to find such ground, else it is left out
+MAST_LANES = 3         # lanes in (OSM's lanes) from which the primary is a mast with an arm over them
 OSM_CARS = {"motorway", "trunk", "primary", "secondary", "tertiary", "unclassified", "residential", "service",
             "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link"}
 
@@ -374,6 +376,48 @@ def main(argv=None):
         q = nose + inward * 0.6
         add({"module": "sign", "code": "D2", "role": "island", "at": q, "facing": unit(nose - cen)})
         n_d2 += 1
+    # every foot on ground a pole may stand on (in game a light stood in the lanes, poles on the cycle paths: the mast
+    # moves above and the median's width took no account of what the strip was, 2026-10-22): moved to the nearest such
+    # spot within SETTLE_M (across the way first, then along it), else left out
+    FOOT = {names.index(k) for k in ("grass", "island", "foot", "platform")}
+    ring_ = FOOT_R * np.c_[np.cos(np.linspace(0, 2 * np.pi, 8, endpoint=False)),
+                           np.sin(np.linspace(0, 2 * np.pi, 8, endpoint=False))]
+
+    def stands(q, mast):
+        k = plan.kind(*(np.r_[[q], q + ring_]).T)
+        if all(int(v) in FOOT for v in k):
+            return True
+        # a mast on the tram's grass where it meets the carriageway (Rotterdam's: on the median's edge)
+        return mast and all(int(v) in FOOT | {TRAM} for v in k)
+
+    settled, moved, dropped = [], 0, []
+    for it in items:
+        q0 = np.asarray(it["at"], np.float64)
+        mast = bool(it.get("mast"))
+        if stands(q0, mast):
+            settled.append(it)
+            continue
+        f_ = unit(np.asarray(it["facing"], np.float64))
+        across = np.array([f_[1], -f_[0]])
+        best = None
+        for r in np.arange(0.25, SETTLE_M + 1e-9, 0.25):
+            for ang in np.linspace(0, 2 * np.pi, 24, endpoint=False):
+                d = np.array([np.cos(ang), np.sin(ang)])
+                q = q0 + d * r
+                if stands(q, mast):
+                    cost = r * (1.0 + 0.5 * abs(float(np.dot(d, f_))))     # (across its traffic's way first)
+                    if best is None or cost < best[0]:
+                        best = (cost, q)
+            if best is not None:
+                break
+        if best is None:
+            dropped.append((it["module"], it.get("role"), [round(float(v), 1) for v in q0]))
+            continue
+        it["at"] = [round(float(v), 3) for v in best[1]]
+        settled.append(it)
+        moved += 1
+    items[:] = settled
+    print(f"feet settled: {moved} moved off the carriageway / cycle path / tram, {len(dropped)} left out {dropped}")
     out = os.path.join(a.ref, "placement.json")
     json.dump({"items": items, "junctions": [[round(float(v), 2) for v in c] for c in cs]}, open(out, "w"), indent=1)
     kinds = {}

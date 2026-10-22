@@ -169,7 +169,9 @@ local function makeHead(inst, a)
     local old = scenetree.findObjectById(h.id)
     if old then old:delete() end
   end
-  local o = inst:createSignalObject(M.SIGNAL_SHAPE, vec3(a[8], a[9], a[10]), quat(0, 0, 0, 1))
+  -- a[12]: the head's own shape where the server names one (a kunstwerk's Dutch head on its pole, kunstwerken.py)
+  local shape = type(a[12]) == 'string' and a[12] or M.SIGNAL_SHAPE
+  local o = inst:createSignalObject(shape, vec3(a[8], a[9], a[10]), quat(0, 0, 0, 1))
   if not o then return end
   local m = MatrixF(true)
   m:setFromEuler(vec3(0, 0, -math.rad(a[11] or 0)))     -- as trees.lua turns the static boom (negated: clockwise)
