@@ -1047,23 +1047,10 @@ def main(argv=None):
     # lights and signs where tools/kunstwerk_placement.py put them (ref/placement.json: each item's module, spot and the
     # way its face looks, toward the traffic it speaks to)
     pl_path = os.path.join(a.ref, "placement.json")
-    items = json.load(open(pl_path))["items"] if os.path.exists(pl_path) else []
-    fx_path = os.path.join(a.ref, "placement_fix.json")      # (the corrections read off Street View: by place)
-    for fx in (json.load(open(fx_path))["fixes"] if os.path.exists(fx_path) else ()):
-        if fx["action"] == "add":
-            items.append({k: v for k, v in fx.items() if k not in ("action", "why")})
-            continue
-        near = np.asarray(fx["near"], np.float64)
-        cand = [i for i, it in enumerate(items) if it["module"] == fx["module"]
-                and np.hypot(*(np.asarray(it["at"]) - near)) < 2.0]
-        if not cand:
-            print(f"placement fix: nothing near {fx['near']} ({fx['why']})")
-            continue
-        i = min(cand, key=lambda i: np.hypot(*(np.asarray(items[i]["at"]) - near)))
-        if fx["action"] == "remove":
-            items.pop(i)
-        else:
-            items[i].update({k: v for k, v in fx.items() if k not in ("action", "why", "near")})
+    from kunstwerk_placement import load_items      # (ref/placement_fix.json: the corrections read off Street View)
+    items, missed = load_items(a.ref)
+    for fx in missed:
+        print(f"placement fix: nothing near {fx['near']} ({fx['why']})")
     if not items:
         print(f"street furniture: no {pl_path} (tools/kunstwerk_placement.py): no lights or signs")
     # a low light's pole without its head: the game puts its switchable Dutch head there (tools/nl_signal_head.py,
@@ -1071,13 +1058,22 @@ def main(argv=None):
     modules = {("traffic_light", False): kit.traffic_light(button=False, head=False),
                ("traffic_light", True): kit.traffic_light(bike=True, button=True, head=False)}
     heads = []
-    hy, hz = kit.head_mount()
+    _, hz = kit.head_mount()
 
-    def head_at(q, f_):
+    def head_at(q, f_, it):
+        """The pole's switchable head (its frame on the pole's axis: kit.signal_head; it stood hy = 9 cm farther out,
+        its clamps off the pole, before 2026-10-22) and its cyclists' head under it ("bike": both their lenses the
+        game's, server kunstwerken.hide_heads gives them one approach); "cycle": the light of a cycle path alone (no
+        car stops at it)."""
         f_ = f_ / max(np.hypot(*f_), 1e-9)
-        c = q + f_ * hy                                 # (the module's +y is its face: its head that far out)
-        heads.append({"at": [round(float(c[0]), 3), round(float(c[1]), 3), round(ground_z(q) + hz, 3)],
-                      "facing": [round(float(f_[0]), 4), round(float(f_[1]), 4)]})
+        fc = [round(float(f_[0]), 4), round(float(f_[1]), 4)]
+        h = {"at": [round(float(q[0]), 3), round(float(q[1]), 3), round(ground_z(q) + hz, 3)], "facing": fc}
+        if it.get("cycle"):
+            h["cycle"] = True
+        heads.append(h)
+        if it.get("bike"):
+            heads.append({"at": [round(float(q[0]), 3), round(float(q[1]), 3), round(ground_z(q) + kit.BIKE_HEAD_Z, 3)],
+                          "facing": fc, "bike": True})
     count = {}
     for it in items:
         q = np.asarray(it["at"], np.float64)
@@ -1101,7 +1097,7 @@ def main(argv=None):
         f_ = np.asarray(it["facing"], np.float64)
         put(mod, q, np.arctan2(f_[1], f_[0]))
         if it["module"] == "traffic_light" and not it.get("mast"):
-            head_at(q, f_)
+            head_at(q, f_, it)
         key = it.get("code") or it["role"]
         key = key if isinstance(key, str) else "+".join(key)
         count[key] = count.get(key, 0) + 1
@@ -1271,14 +1267,19 @@ def wall_run(part, a, b, z0, z1, uv_m=1.0):
 
 
 def welded(p):
-    """The part with its coinciding vertices (same place, same UV) merged and its degenerate triangles dropped."""
+    """The part with its coinciding vertices (same place, same UV) merged and its degenerate triangles dropped; a
+    two-sided face's back on vertices of its own again (on the front's the engine's vertex normals were noise: the
+    signs' faces shaded in radial streaks, server kunstwerken.two_sided_apart, 2026-10-22)."""
+    sys.path.insert(0, os.path.join(HERE, "..", "server"))
+    from kunstwerken import two_sided_apart
     P, T, UV = np.asarray(p["positions"]), np.asarray(p["tris"]), np.asarray(p["uvs"])
     key = np.c_[np.round(P, 3), np.round(UV, 3)]
     _, first, inv = np.unique(key, axis=0, return_index=True, return_inverse=True)
     inv = inv.ravel()
     T = inv[T]
     T = T[(T[:, 0] != T[:, 1]) & (T[:, 1] != T[:, 2]) & (T[:, 0] != T[:, 2])]
-    return {**p, "positions": P[first].tolist(), "tris": T.tolist(), "uvs": UV[first].tolist()}
+    P, T, UV = two_sided_apart(P[first], T, UV[first])
+    return {**p, "positions": P.tolist(), "tris": T.tolist(), "uvs": UV.tolist()}
 
 
 def _minus(pa, pb, qs):

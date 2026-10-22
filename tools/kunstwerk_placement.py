@@ -13,6 +13,8 @@ sit on the road's middle): ref/placement.json, for tools/kunstwerk_props.py's mo
   stands (ndw_signs).
 
     python3 tools/kunstwerk_placement.py ../design/kunstwerken/droogleever/ref
+    python3 tools/kunstwerk_placement.py ../design/kunstwerken/droogleever/ref --check \\
+        [--kunstwerk server/data/kunstwerken/droogleever.kunstwerk.json [--graph]]
 
 Writes ref/placement.json: {"items": [{"module": "traffic_light" | "sign", "code": ..., "role": ..., "at": [x, y],
 "facing": [fx, fy]}]}; a light's "bike" when a cycle path runs beside it.
@@ -57,7 +59,10 @@ def unit(v):
 
 POST_M = 0.8            # m: NDW's signs this near each other (and looking the same way) are one post's plates
 ON_LIGHT_M = 1.5        # m: a sign this near a light (looking its way) is a plate on the light's pole
-ALONG_ROAD = 0.5        # cos: a road's axis this near the register's quarter gives the sign's exact facing
+# cos: a road's axis this near the register's quarter gives the sign's exact facing: within 45 degrees, the quarter's
+# own reach (at 0.5, 60 degrees, two C4 and a B6 were turned square to a road beside the one they speak to: --check,
+# 2026-10-22)
+ALONG_ROAD = 0.7
 # a post's plates from the top down: priority, then bans and orders, then the rest, the sub-signs (OB) last
 PLATE_ORDER = "BCFADEGLJ"
 
@@ -84,6 +89,25 @@ def osm_ways(path, local):
 OSM_AXIS_M = 12.0       # m: an OSM way this near a sign gives its road's direction
 
 
+def speed_code(pr):
+    """A sign's code from NDW's record: its rvvCode, an A1 with its limit ("A1_50": the atlas's cell with that number,
+    tools/sign_atlas.py SPEEDS) where the register gives one (blackCode, else a number in its textSigns); the plain A1
+    (Commons' 50) else. Every A1 plate showed that 50 (the user 2026-10-22)."""
+    import re
+    import kunstwerk_props as kit
+    code = pr.get("rvvCode") or ""
+    if code != "A1":
+        return code
+    texts = [pr.get("blackCode")]
+    for t in pr.get("textSigns") or ():
+        texts += list(t.values()) if isinstance(t, dict) else [t]
+    for t in texts:
+        m = re.fullmatch(r"\s*(\d{1,3})\s*(km/?h)?\s*", str(t)) if t is not None else None
+        if m and f"A1_{int(m.group(1))}" in kit.PLATES:
+            return f"A1_{int(m.group(1))}"
+    return code
+
+
 def ndw_signs(feats, items, local, inside_box, road_axis, ways=(np.zeros((0, 2)), np.zeros((0, 2)))):
     """NDW's signs (GeoJSON features) as items: beside the road (placement L), with a code the kit draws; their facing
     against the register's bearing (the way the traffic they speak to drives: toward the junction for a give-way
@@ -108,7 +132,7 @@ def ndw_signs(feats, items, local, inside_box, road_axis, ways=(np.zeros((0, 2))
     signs, skipped = [], 0
     for f in feats:
         pr = f["properties"]
-        code = pr.get("rvvCode") or ""
+        code = speed_code(pr)
         p = local({"lat": f["geometry"]["coordinates"][1], "lon": f["geometry"]["coordinates"][0]})
         if code not in kit.PLATES or pr.get("placement") != "L" or not inside_box(p):
             skipped += 1
@@ -120,16 +144,23 @@ def ndw_signs(feats, items, local, inside_box, road_axis, ways=(np.zeros((0, 2))
             ax = osm_axis(p, face)                            # (no lane dashes there: the nearest OSM way's)
         if ax is not None and abs(float(ax @ face)) >= ALONG_ROAD:
             face = ax if ax @ face > 0 else -ax
-        signs.append((p, unit(face), code))
+        signs.append((p, unit(face), code, float(pr.get("bearing") or 0.0)))
     posts = []
-    for p, face, code in signs:
+    for p, face, code, bearing in signs:
         for post in posts:
             if np.hypot(*(post["p"] - p)) < POST_M and post["face"] @ face > 0.7:
                 if code not in post["codes"]:
                     post["codes"].append(code)
                 break
         else:
-            posts.append({"p": p, "face": face, "codes": [code]})
+            # a sign back to back with another (NDW lists each face: an E1 for each way of a street) stands on that
+            # one's post, its plate on the other side: on two posts 0.2 m apart the plates stood one in the other
+            # (--check, 2026-10-22)
+            for post in posts:
+                if np.hypot(*(post["p"] - p)) < POST_M and post["face"] @ face < -0.7:
+                    p = post["p"]
+                    break
+            posts.append({"p": p, "face": face, "codes": [code], "bearing": bearing})
     n_posts = n_light = 0
     for post in posts:
         codes = sorted(post["codes"], key=lambda c: (PLATE_ORDER.find(c[0]), c))
@@ -143,15 +174,283 @@ def ndw_signs(feats, items, local, inside_box, road_axis, ways=(np.zeros((0, 2))
             continue
         items.append({"module": "sign", "code": codes if len(codes) > 1 else codes[0], "role": "ndw",
                       "at": [round(float(v), 3) for v in post["p"]],
-                      "facing": [round(float(v), 4) for v in post["face"]]})
+                      "facing": [round(float(v), 4) for v in post["face"]],
+                      "bearing": post["bearing"]})        # (the register's: --check compares it with the road)
         n_posts += 1
     return n_posts, n_light, skipped
+
+
+def load_items(ref_dir):
+    """ref/placement.json's items with ref/placement_fix.json's corrections applied (read off Street View: each matched
+    to the item of its module nearest its "near", within 2 m; "add" ones appended), as tools/kunstwerk_solid.py puts
+    them. Returns (items, the fixes that matched nothing)."""
+    pl_path = os.path.join(ref_dir, "placement.json")
+    items = json.load(open(pl_path))["items"] if os.path.exists(pl_path) else []
+    fx_path = os.path.join(ref_dir, "placement_fix.json")
+    missed = []
+    for fx in (json.load(open(fx_path))["fixes"] if os.path.exists(fx_path) else ()):
+        if fx["action"] == "add":
+            items.append({k: v for k, v in fx.items() if k not in ("action", "why")})
+            continue
+        near = np.asarray(fx["near"], np.float64)
+        cand = [i for i, it in enumerate(items) if it["module"] == fx["module"]
+                and np.hypot(*(np.asarray(it["at"]) - near)) < 2.0]
+        if not cand:
+            missed.append(fx)
+            continue
+        i = min(cand, key=lambda i: np.hypot(*(np.asarray(items[i]["at"]) - near)))
+        if fx["action"] == "remove":
+            items.pop(i)
+        else:
+            items[i].update({k: v for k, v in fx.items() if k not in ("action", "why", "near")})
+    return items, missed
+
+
+# --check: which way each placed sign and head looks, against the traffic of the road it stands at (the user,
+# 2026-10-22: signs and lights placed for the wrong approach, mixed up, facing the wrong traffic)
+CHECK_WAY_M = 15.0      # m: the OSM ways this near an item are the ones it may speak to
+CHECK_AWAY = 60.0       # degrees: a face turned more than this from its traffic's oncoming is turned away
+CHECK_NDW = 45.0        # degrees: NDW's bearing (a compass quarter) this far off the road's traffic disagrees
+CHECK_POLE_M = 0.5      # m: heads this near each other are one pole's
+CHECK_DOUBLE_M = 1.0    # m: one code twice this near (on two posts, looking one way) is one sign drawn twice
+CHECK_DEG_M = 0.15      # m a degree of a way's traffic off an item's face counts as (its road: near, and square to it)
+AGAINST = {"C2"}        # signs that face the traffic a one-way road forbids (no entry: at its far end)
+
+
+def osm_traffic(path, local):
+    """OSM's ways at grade (osm_map.xml) for --check: [(way id, tags, a (k, 2), b (k, 2), directions)] with each
+    segment's travel directions as the way's oneway allows (1: a -> b, -1: b -> a), and its signal nodes
+    [(node id, point, tags, the ways in: [(way id, travel unit into the node)])]."""
+    import xml.etree.ElementTree as ET
+    if not os.path.exists(path):
+        return [], []
+    root = ET.parse(path).getroot()
+    nodes = {n.get("id"): n for n in root.findall("node")}
+    xy = {}
+
+    def at(nid):
+        if nid not in xy:
+            xy[nid] = local({"lat": float(nodes[nid].get("lat")), "lon": float(nodes[nid].get("lon"))})
+        return xy[nid]
+    ways, by_node = [], {}
+    for w in root.findall("way"):
+        t = {x.get("k"): x.get("v") for x in w.findall("tag")}
+        hw = t.get("highway")
+        if hw not in OSM_CARS and hw not in ("cycleway", "busway", "bus_guideway") \
+                or t.get("layer", "0") != "0" or t.get("tunnel") not in (None, "no"):
+            continue
+        refs = [r.get("ref") for r in w.findall("nd") if r.get("ref") in nodes]
+        if len(refs) < 2:
+            continue
+        P = np.array([at(r) for r in refs])
+        ow = t.get("oneway")
+        dirs = (1,) if ow in ("yes", "1", "true") or t.get("junction") == "roundabout" else (-1,) if ow == "-1" \
+            else (1, -1)
+        ways.append((w.get("id"), t, P[:-1], P[1:], dirs))
+        for i, r in enumerate(refs):
+            by_node.setdefault(r, []).append((w.get("id"), t, refs, i, dirs))
+    sigs = []
+    for nid, nd in nodes.items():
+        nt = {x.get("k"): x.get("v") for x in nd.findall("tag")}
+        if nt.get("highway") != "traffic_signals" and nt.get("crossing") != "traffic_signals":
+            continue
+        sd = nt.get("traffic_signals:direction")
+        ins = []
+        for wid, t, refs, i, dirs in by_node.get(nid, ()):
+            p = at(nid)
+            if i > 0 and 1 in dirs and sd in (None, "forward", "both"):
+                ins.append((wid, unit(p - at(refs[i - 1]))))
+            if i < len(refs) - 1 and -1 in dirs and sd in (None, "backward", "both"):
+                ins.append((wid, unit(p - at(refs[i + 1]))))
+        sigs.append((nid, at(nid), nt, ins))
+    return ways, sigs
+
+
+def _angle(u, v):
+    return float(np.degrees(np.arccos(np.clip(float(np.dot(unit(u), unit(v))), -1.0, 1.0))))
+
+
+def check_items(items, ways, sigs):
+    """The --check table's rows: per item {"i", "module", "code", "at", "way", "travel", "face_err", "approach",
+    "flags"}: the OSM way it stands at (the nearest within CHECK_WAY_M whose traffic it may face: a light's or a
+    sign's face looks at its traffic), that traffic's travel direction, the angle between its face and the oncoming
+    of that traffic, a light's approach (the OSM signal within OSM_MATCH_M whose way in it looks at); flags: "away"
+    (its face turned more than CHECK_AWAY from every traffic near), "no signal" (a head whose approach has no signal),
+    "2 heads" (two heads for one approach on one pole), "ndw" (NDW's bearing more than CHECK_NDW off the road's
+    traffic), "double" (one code twice within CHECK_DOUBLE_M on two posts). Pure."""
+    rows = []
+    for i, it in enumerate(items):
+        p = np.asarray(it["at"], np.float64)[:2]
+        f = unit(np.asarray(it["facing"], np.float64)[:2])
+        code = it.get("code", it.get("role", ""))
+        code = code if isinstance(code, str) else "+".join(code)
+        if it["module"] == "traffic_light" and it.get("plates"):
+            code = "light+" + "+".join(it["plates"])
+        elif it["module"] in ("traffic_light", "head"):
+            code = it.get("code", "head") if it["module"] == "head" else "light"
+        against = bool(set(code.split("+")) & AGAINST)
+        best = None
+        for wid, t, A, B, dirs in ways:
+            d = B - A
+            L2 = np.maximum((d * d).sum(1), 1e-9)
+            s = np.clip(((p - A) * d).sum(1) / L2, 0, 1)
+            dist = np.hypot(*(A + d * s[:, None] - p).T)
+            for k in np.flatnonzero(dist < CHECK_WAY_M):
+                for sg in (dirs if not against else (1, -1)):
+                    tr = unit(d[k] * sg)
+                    err = _angle(f, -tr)
+                    key = (err > CHECK_AWAY, float(dist[k]) + CHECK_DEG_M * err, err)
+                    if best is None or key < best[0]:
+                        best = (key, wid, t, tr, err)
+        row = {"i": i, "module": it["module"], "code": code, "at": [round(float(v), 1) for v in p], "facing": f,
+               "way": None, "travel": None, "face_err": None, "approach": None, "flags": []}
+        if best is None:
+            row["flags"].append("no road")
+        else:
+            _, wid, t, tr, err = best
+            row.update(way=f"{t.get('name', '?')} ({t.get('highway')} w{wid})", travel=[round(float(v), 2) for v in tr],
+                       face_err=round(err))
+            if err > CHECK_AWAY:
+                row["flags"].append("away")
+        if it["module"] in ("traffic_light", "head"):
+            app = None
+            for nid, q, nt, ins in sigs:
+                dd = float(np.hypot(*(q - p)))
+                if dd > OSM_MATCH_M:
+                    continue
+                for wid, h in ins:
+                    if float(f @ -h) > 0.7 and (app is None or dd < app[0]):
+                        app = (dd, f"n{nid}/w{wid}")
+            if app is None:
+                row["flags"].append("no signal")
+            else:
+                row["approach"] = app[1]
+        if it.get("bearing") is not None and best is not None:
+            b = np.radians(float(it["bearing"]))
+            bt = np.array([np.sin(b), np.cos(b)])           # (the way its traffic drives: RD x east, y north)
+            ang = min(_angle(bt, unit((B_ - A_)[k] * sg)) for wid_, t_, A_, B_, dirs_ in ways if wid_ == best[1]
+                      for k in range(len(A_)) for sg in (dirs_ if not against else (1, -1)))
+            row["ndw_err"] = round(ang)
+            if ang > CHECK_NDW:
+                row["flags"].append("ndw")
+        rows.append(row)
+    for a in rows:
+        for b in rows:
+            if b["i"] <= a["i"]:
+                continue
+            d = float(np.hypot(a["at"][0] - b["at"][0], a["at"][1] - b["at"][1]))
+            if a["module"] in ("traffic_light", "head") and b["module"] == a["module"] and d < CHECK_POLE_M \
+                    and a["approach"] and a["approach"] == b["approach"] and a["code"] == b["code"]:
+                b["flags"].append("2 heads")
+            if a["module"] == b["module"] == "sign" and d < CHECK_DOUBLE_M \
+                    and set(a["code"].split("+")) & set(b["code"].split("+")) and a["facing"] @ b["facing"] > 0.7:
+                b["flags"].append(f"double of {a['i']}")
+    return rows
+
+
+def print_check(rows, title):
+    print(f"\n{title}: {len(rows)} items, {sum(1 for r in rows if r['flags'])} flagged")
+    print(f"{'#':>3} {'item':<14} {'at':>13}  {'way':<46} {'travel':>13} {'face':>5} {'ndw':>4}  {'approach':<26} "
+          f"{'ai':<5} flags")
+    for r in rows:
+        tr = "" if r["travel"] is None else f"({r['travel'][0]:+.2f},{r['travel'][1]:+.2f})"
+        fe = "" if r["face_err"] is None else f"{r['face_err']}"
+        print(f"{r['i']:>3} {r['code'][:14]:<14} {r['at'][0]:>6.1f},{r['at'][1]:>6.1f}  {str(r['way'])[:46]:<46} "
+              f"{tr:>13} {fe:>5} {str(r.get('ndw_err', '')):>4}  {str(r['approach'] or '')[:26]:<26} "
+              f"{r.get('ai', ''):<5} "
+              f"{', '.join(r['flags'])}")
+
+
+def check_main(ref_dir, kunstwerk=None, graph=False):
+    """--check: the table for ref/placement.json (+ placement_fix.json) and, given the kunstwerk's server file, for
+    its switchable heads as shipped (and, --graph, which of them the AI graph's approaches take: the map cache)."""
+    import ahn as ahnmod
+    ref = json.load(open(os.path.join(ref_dir, "ref.json"), encoding="utf-8"))
+
+    def local(e):
+        rx, ry = ahnmod.wgs_to_rd(e["lat"], e["lon"])
+        return np.array([rx - ref["origin_rd"][0], ry - ref["origin_rd"][1]])
+    ways, sigs = osm_traffic(os.path.join(ref_dir, "osm_map.xml"), local)
+    items, missed = load_items(ref_dir)
+    for fx in missed:
+        print(f"placement fix matched nothing near {fx['near']}: {fx.get('why', '')}")
+    rows = check_items(items, ways, sigs)
+    print_check(rows, os.path.join(ref_dir, "placement.json"))
+    out = {"placement": rows}
+    if kunstwerk:
+        kw = json.load(open(kunstwerk, encoding="utf-8"))
+        heads = [{"module": "head", "at": s["at"][:2], "facing": s["facing"],
+                  "code": "bike head" if s.get("bike") else "cycle head" if s.get("cycle") else "head"}
+                 for s in kw.get("signals", ())]
+        hrows = check_items(heads, ways, sigs)
+        if graph:
+            for r, got in zip(hrows, graph_heads(kunstwerk)):
+                if not got:
+                    r["flags"].append("no AI approach")
+                else:
+                    r["ai"] = got
+        print_check(hrows, kunstwerk + " (its switchable heads)")
+        out["heads"] = hrows
+    return out
+
+
+def graph_heads(kunstwerk_path):
+    """Per head of the kunstwerk: how the AI graph round it (built offline from the map cache, the mapped controls as
+    the server's; server kunstwerken.hide_heads) shows it: "app" (a graph's signalled approach's first head), "app+"
+    (one more head of one: a repeater, a cyclists' head beside it), "made" (an approach made on its road), "" (none)."""
+    import copy
+    import geodesy
+    import mapcells
+    import mapdata
+    import navgraph
+    import netfetch
+    import furniture
+    import kunstwerken
+    kw = kunstwerken.Kunstwerk(json.load(open(kunstwerk_path, encoding="utf-8")))
+    saved, kunstwerken._all = kunstwerken._all, [kw]
+    try:
+        import ahn
+        la0, lo0 = ahn.rd_to_wgs(*kw.origin)
+        frame = geodesy.EnuFrame(float(la0), float(lo0))
+        md = mapdata.MapData(mapdata.DEFAULT_CACHE, netfetch.Fetcher(offline=True))
+        w = navgraph.WINDOW_M + 200.0
+        la, lo, _ = frame.enu_to_geodetic(np.array([-w, w]), np.array([-w, w]), 0.0)
+        keys = mapcells.cells_for_bbox(float(la.min()), float(lo.min()), float(la.max()), float(lo.max()))
+        feats = [md.cell(k, layers=("roads",), kind="demand").layers.get("roads") for k in keys]
+        mapped = furniture.Mapped.load(md, frame, (-w, -w, w, w))
+
+        def elev(a, b):         # (the kunstwerk's decks and floor, the streets round it at 3 m: heads over their road)
+            z = kw.deck_top(a, b)
+            f = kw.floor_at(a, b)
+            return np.where(np.isfinite(z), z, np.where(np.isfinite(f), f, 3.0)).reshape(np.shape(a))
+        g = navgraph.build(frame, feats, elev, (0.0, 0.0), lambda a, b: np.ones(np.shape(a), bool), mapped=mapped)
+        before = {id(a) for s in g["signals"] for a in s["app"]}
+        sig = kunstwerken.hide_heads(frame, copy.copy(g["signals"]), g, mapped)
+        got = []
+        for s in sig:
+            for a in s["app"]:
+                kind = "app" if id(a) in before else "made"
+                for n, hh in enumerate([a[7:12]] + (a[12] if len(a) > 12 else [])):
+                    if hh[0] is not None:
+                        got.append((hh[0], hh[1], kind if n == 0 or kind == "made" else "app+"))
+        return [next((k for gx, gy, k in got if abs(gx - x) < 0.05 and abs(gy - y) < 0.05), "")
+                for x, y, *_ in kw.heads(frame)]
+    finally:
+        kunstwerken._all = saved
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("ref")
+    ap.add_argument("--check", action="store_true", help="write nothing: a table of every placed sign and head, the "
+                    "road it stands at, the angle of its face to that traffic's oncoming, its approach and what is off")
+    ap.add_argument("--kunstwerk", help="with --check: the server's <name>.kunstwerk.json, its heads as shipped")
+    ap.add_argument("--graph", action="store_true", help="with --kunstwerk: which approach of the AI graph (built "
+                    "offline from the map cache) shows each head")
     a = ap.parse_args(argv)
+    if a.check:
+        rows = check_main(a.ref, a.kunstwerk, a.graph)
+        return 1 if any(r["flags"] for rs in rows.values() for r in rs) else 0
     import ahn as ahnmod
     import kunstwerk_solid as ks
     from kunstwerk_design import carriageways
@@ -391,7 +690,8 @@ def main(argv=None):
                         off = np.flatnonzero(plan.kind(*(p + np.outer(s, right)).T) != CYCLE)
                         q = p + right * ((s[off[0]] if len(off) else 1.4) + 0.5) + h * PAST_LINE_M
                         if plan.kind(*q[:, None])[0] != ROAD:
-                            add({"module": "traffic_light", "role": "primary", "at": q, "facing": -h, "bike": True})
+                            add({"module": "traffic_light", "role": "primary", "at": q, "facing": -h, "bike": True,
+                                 "cycle": True})     # (its cyclists' alone: no car stops at it)
                             n_osm += 1
                         continue
                     side = None
@@ -532,4 +832,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
