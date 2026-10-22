@@ -15,7 +15,8 @@ import numpy as np
 FLOOR_PARTS = ("road", "street_", "decks")      # parts whose top is a floor a car or a cyclist is on
 UV_M = {"road_asphalt_2lane": 8.0, "bne_sidewalk_brick": 1.2, "sidewalk_concrete": 1.5, "italy_cobblestone": 1.0,
         "bne_tunnel_soil": 2.0, "bne_grass": 2.0, "curbs": 2.0, "bne_bridge_concrete": 1.0, "bne_truss_steel": 1.0,
-        "bne_concrete_dark": 4.0, "bne_cycle_red": 8.0, "bne_paint_white": 8.0}
+        "bne_concrete_dark": 4.0, "bne_cycle_red": 8.0, "bne_paint_white": 8.0,
+        "bne_tunnel_tiles": 0.6, "bne_tunnel_light": 1.0}     # (tiles: its texture's 4 x 4 tiles of 15 cm)
 
 
 def raster_floor(P, T, x0, y0, nx, ny):

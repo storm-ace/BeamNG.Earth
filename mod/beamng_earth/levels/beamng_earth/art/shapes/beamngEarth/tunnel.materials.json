@@ -397,5 +397,31 @@
     ],
     "groundType": "CONCRETE",
     "translucent": false
+  },
+  "bne_tunnel_tiles": {
+    "name": "bne_tunnel_tiles",
+    "mapTo": "bne_tunnel_tiles",
+    "class": "Material",
+    "version": 1.5,
+    "persistentId": "ff54770e-7acc-59bd-bc6e-11f4f78ba790",
+    "Stages": [
+      {
+        "baseColorMap": "/assets/materials/tileable/tile/eca_bld_floortiles/eca_bld_floortiles_d.dds",
+        "normalMap": "/assets/materials/tileable/tile/eca_bld_floortiles/eca_bld_floortiles_n.dds",
+        "roughnessFactor": 0.35,
+        "metallicFactor": 0,
+        "baseColorFactor": [
+          0.9,
+          0.88,
+          0.8,
+          1
+        ]
+      },
+      {},
+      {},
+      {}
+    ],
+    "groundType": "CONCRETE",
+    "translucent": false
   }
 }

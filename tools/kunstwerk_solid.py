@@ -71,6 +71,11 @@ SIGNAL_H = 3.4          # m: a traffic light's pole
 RAIL_W, RAIL_UP = 0.07, 0.025   # m: a tram rail's head as seen (with its groove), over the street or the grass
 RED_LIFT = 0.03          # m: a red crossing over its asphalt (clear of it in the depth buffer; the white over it)
 PAINT_LIFT = 0.045       # m: paint over its street (the red of a crossing half that)
+TILE_OFF = 0.02         # m the tiles stand in front of a passage's wall
+TILE_FOOT = 0.4         # m of bare concrete under them
+LAMP_EVERY_M, LAMP_L, LAMP_D, LAMP_H, LAMP_DOWN_M = 6.0, 1.2, 0.15, 0.12, 0.35   # m: a passage's wall lamps
+ROAD_TEX_L = 11.0      # m along a trench carriageway per repeat of its asphalt (the generator's roads.py "paved")
+ROAD_UV_M = 8.0         # m a UV unit is in the export (tools/kunstwerk_export.py UV_M of road_asphalt_2lane)
 
 # the plan's kinds: name, material, lift over the streets' surface (m), the BGT's functions painted as it (in painting order: the
 # later win where they overlap)
@@ -131,8 +136,8 @@ def osm_platforms(ref):
 
 
 def osm_trench_lanes(ref, cws):
-    """Per carriageway its OSM way's lanes: name -> (travel, lanes), travel +1 where it is driven along +t, lanes from
-    the left as driven, each its bus:lanes value ("designated": a bus lane; one trench's right lane is the bus's,
+    """Per carriageway its OSM way's lanes: name -> (travel, lanes, ref), travel +1 where it is driven along +t, lanes
+    from the left as driven, each its bus:lanes value ("designated": a bus lane; one trench's right lane is the bus's,
     'no|designated', the user 2026-10-22: "1 baan voor auto's, andere voor bus"). The way most of whose nodes lie in
     the carriageway's strip; none: not in the result."""
     import xml.etree.ElementTree as ET
@@ -170,20 +175,34 @@ def osm_trench_lanes(ref, cws):
             bus = tags.get("bus:lanes", "").split("|")
             lanes = [bus[k] if len(bus) == n else "yes" for k in range(n)]
             if inside.sum() > best.get(c.name, (0,))[0]:
-                best[c.name] = (int(inside.sum()), travel, lanes)
-    return {k: (v[1], v[2]) for k, v in best.items()}
+                best[c.name] = (int(inside.sum()), travel, lanes, tags.get("ref", ""))
+    return {k: (v[1], v[2], v[3]) for k, v in best.items()}
 
 
-BUS_TEXT_FIRST_M = 12.0     # m from a carriageway's ends the first BUS stands
+BUS_TEXT_FIRST_M = 12.0     # m from a carriageway's ends the first text stands
 BUS_TEXT_EVERY_M = 45.0     # m between them
-ROAD_TEXT_H, ROAD_TEXT_W, ROAD_TEXT_GAP = 3.0, 0.65, 0.25    # m: a letter's length along the lane, its width, between
-ROAD_TEXT_STROKE = 0.15     # m
-LETTERS = {     # strokes in a 1 x 1 box: x across (+: right as driven), y along (+: ahead)
+LINE_W = 0.10               # m: a lane line (CROW, 50 km/h)
+DOUBLE_GAP = 0.10           # m between the two lines beside a bus lane (Street View: as wide as a line)
+# a text's letters: (length along the lane, width, between, stroke) m. LIJN over BUS, small (Street View 2026-10-22:
+# "veel kleine letters met Lijn bus"), the road's number larger
+BUS_SIZE = (1.6, 0.42, 0.14, 0.12)
+BUS_TEXT = (("BUS", BUS_SIZE), ("LIJN", BUS_SIZE))      # (from the nearest row as driven)
+REF_TEXT_SIZE = (2.4, 0.55, 0.18, 0.14)
+TEXT_ROW_GAP = 0.6          # m between a text's rows
+LETTERS = {     # strokes in a 1 x 1 box: x across (+: right as driven), y along (+: ahead); None lifts the pen
     "B": [(0, 0), (0, 1), None, (0, 1), (0.7, 1), (1, 0.88), (1, 0.62), (0.7, 0.5), (0, 0.5), None,
           (0.7, 0.5), (1, 0.38), (1, 0.12), (0.7, 0), (0, 0)],
     "U": [(0, 1), (0, 0.15), (0.3, 0), (0.7, 0), (1, 0.15), (1, 1)],
     "S": [(1, 0.9), (0.75, 1), (0.25, 1), (0, 0.88), (0, 0.62), (0.25, 0.5), (0.75, 0.5), (1, 0.38), (1, 0.12),
           (0.75, 0), (0.25, 0), (0, 0.1)],
+    "L": [(0, 1), (0, 0), (1, 0)],
+    "I": [(0.5, 0), (0.5, 1)],
+    "J": [(1, 1), (1, 0.2), (0.75, 0), (0.25, 0), (0, 0.2)],
+    "N": [(0, 0), (0, 1), (1, 0), (1, 1)],
+    "0": [(0.25, 0), (0.75, 0), (1, 0.15), (1, 0.85), (0.75, 1), (0.25, 1), (0, 0.85), (0, 0.15), (0.25, 0)],
+    "1": [(0.2, 0.8), (0.6, 1), (0.6, 0)],
+    "3": [(0, 0.9), (0.25, 1), (0.75, 1), (1, 0.88), (1, 0.62), (0.75, 0.5), (0.35, 0.5), None, (0.75, 0.5),
+          (1, 0.38), (1, 0.12), (0.75, 0), (0.25, 0), (0, 0.1)],
 }
 
 
@@ -194,25 +213,27 @@ def flat_quad(part, q):
     part.add(q, [[0, 1, 2], [0, 2, 3]] if up else [[0, 2, 1], [0, 3, 2]], [[0, 0], [1, 0], [1, 1], [0, 1]])
 
 
-def road_text(part, c, t, w, travel, z, text="BUS"):
-    """Text painted in a lane of the carriageway c, its foot at t (w across), read by who drives it (travel along t)."""
-    total = len(text) * ROAD_TEXT_W + (len(text) - 1) * ROAD_TEXT_GAP
+def road_text(part, c, t, w, travel, z, text, size):
+    """Text painted in a lane of the carriageway c, its foot at t (w across), read by who drives it (travel along t);
+    size: (a letter's length along the lane, its width, the space between letters, the stroke) m."""
+    H, Wl, gap, stroke = size
+    total = len(text) * Wl + (len(text) - 1) * gap
     for i, ch in enumerate(text):
-        x0 = -total / 2 + i * (ROAD_TEXT_W + ROAD_TEXT_GAP)
+        x0 = -total / 2 + i * (Wl + gap)
         pts = LETTERS[ch]
         for a, b in zip(pts[:-1], pts[1:]):
             if a is None or b is None:
                 continue
             # letter (x right, y ahead) -> (t, w): ahead is travel along t, right as driven is -travel along w
-            A = np.array([t + travel * a[1] * ROAD_TEXT_H, w - travel * (x0 + a[0] * ROAD_TEXT_W)])
-            B = np.array([t + travel * b[1] * ROAD_TEXT_H, w - travel * (x0 + b[0] * ROAD_TEXT_W)])
+            A = np.array([t + travel * a[1] * H, w - travel * (x0 + a[0] * Wl)])
+            B = np.array([t + travel * b[1] * H, w - travel * (x0 + b[0] * Wl)])
             pa, pb = c.xy(A[0], A[1])[0], c.xy(B[0], B[1])[0]
             d = pb - pa
             L = np.hypot(*d)
             if L < 1e-6:
                 continue
-            nn = np.array([-d[1], d[0]]) / L * ROAD_TEXT_STROKE / 2
-            ext = d / L * ROAD_TEXT_STROKE / 2            # (each stroke a little past its ends: the corners closed)
+            nn = np.array([-d[1], d[0]]) / L * stroke / 2
+            ext = d / L * stroke / 2                      # (each stroke a little past its ends: the corners closed)
             flat_quad(part, [(*(pa - ext + nn), z), (*(pa - ext - nn), z), (*(pb + ext - nn), z), (*(pb + ext + nn), z)])
 
 
@@ -638,7 +659,16 @@ def main(argv=None):
                 tri3 = [[0, 2, 1]]
             else:
                 tri3 = [[0, 1, 2]]
-            top_part[k].add(P3, tri3, P2)
+            if k == TRENCH:
+                # along its carriageway, the texture's width the carriageway's, ROAD_TEX_L along it (as the
+                # generator's roads): laid on the world's axes its wheel tracks ran askew across the trench and the
+                # asphalt looked stretched (the user, 2026-10-22). In texture metres (the export divides by its UV_M)
+                c = cws[tc[i]]
+                t_, w_ = c.tw(*P2.T)
+                uv = np.c_[(w_ + c.W / 2) / c.W, t_ / ROAD_TEX_L] * ROAD_UV_M
+            else:
+                uv = P2
+            top_part[k].add(P3, tri3, uv)
             if lo is not None:
                 walls.add(np.c_[P2, lo], [tri3[0][::-1]], P2)
     # sides: per edge between two triangles, what one's solid has and the other's lacks, facing the other
@@ -688,6 +718,8 @@ def main(argv=None):
     # --- details: copings and railings on the walls, parapets on the decks' ends, markings, lamps
     rails = part("railings", "bne_truss_steel")
     marks = part("markings", "bne_paint_white")
+    tiles = part("tunnel_tiles", "bne_tunnel_tiles")
+    lamps = part("tunnel_lamps", "bne_tunnel_light")
     parapets = part("parapets", "bne_concrete_dark")
     kind_no_ = {kk[0]: n for n, kk in enumerate(KINDS)}
     for c in cws:
@@ -732,32 +764,68 @@ def main(argv=None):
                     railing(rails, line[j:e], ztop[j:e])
                 j = e
         # (the decks' parapets: the BGT's walls across them, below)
-        # lane markings on the floor: edge lines, the lane lines between OSM's lanes (dashed; solid beside a bus lane),
-        # and BUS in a bus lane
+        # lane markings on the floor (Street View, the user 2026-10-22): no edge lines; between OSM's lanes a dashed
+        # line, two solid lines beside a bus lane; LIJN over BUS in a bus lane, the road's number (S103) in the others
         mk = np.arange(c.t0, c.t1 + 1e-6, 1.0)
         fz = np.interp(mk, c.ts, c.floor) + PAINT_LIFT
         s = np.r_[0, np.cumsum(np.hypot(*np.diff(c.xy(mk, 0), axis=0).T))]
-        travel, lanes = trench_lanes.get(c.name, (1.0, ["yes", "yes"]))
+        travel, lanes, ref_ = trench_lanes.get(c.name, (1.0, ["yes", "yes"], ""))
         inner = c.W - 2 * SHOULDER - 0.2
         # lane k (from the left as driven) between w = travel * (inner / 2 - k * inner / N) and the next
         bounds = [travel * (inner / 2 - k * inner / len(lanes)) for k in range(len(lanes) + 1)]
-        lines_ = [(bounds[0], False), (bounds[-1], False)]
-        lines_ += [(bounds[k], "designated" not in (lanes[k - 1], lanes[k])) for k in range(1, len(lanes))]
+        lines_ = []
+        for k in range(1, len(lanes)):
+            if "designated" in (lanes[k - 1], lanes[k]):
+                lines_ += [(bounds[k] + sg * (LINE_W + DOUBLE_GAP) / 2, False) for sg in (-1, 1)]
+            else:
+                lines_.append((bounds[k], True))
         for off, dash in lines_:
-            A_, B_ = c.xy(mk, off + 0.075), c.xy(mk, off - 0.075)
+            A_, B_ = c.xy(mk, off + LINE_W / 2), c.xy(mk, off - LINE_W / 2)
             ok = in_area(*c.xy(mk, off).T)
             for j in range(len(mk) - 1):
                 if not (ok[j] and ok[j + 1]) or (dash and (s[j] % 12.0) >= 3.0):
                     continue
                 flat_quad(marks, [(*A_[j], fz[j]), (*B_[j], fz[j]), (*B_[j + 1], fz[j + 1]), (*A_[j + 1], fz[j + 1])])
         for k, lane in enumerate(lanes):
-            if lane != "designated":
+            rows = (BUS_TEXT if lane == "designated" else ((ref_, REF_TEXT_SIZE),) if ref_ else ())
+            if not rows:
                 continue
             w_mid = (bounds[k] + bounds[k + 1]) / 2
             for t_ in np.arange(c.t0 + BUS_TEXT_FIRST_M, c.t1 - BUS_TEXT_FIRST_M, BUS_TEXT_EVERY_M):
                 if any(d0 - 3 <= t_ <= d1 + 3 for d0, d1 in c.decks) or not in_area(*c.xy(t_, w_mid).T)[0]:
                     continue
-                road_text(marks, c, t_, w_mid, travel, float(np.interp(t_, c.ts, c.floor)) + PAINT_LIFT)
+                z_ = float(np.interp(t_, c.ts, c.floor)) + PAINT_LIFT
+                foot = t_
+                for text, size in rows:               # (the first row nearest who drives up to it)
+                    road_text(marks, c, foot, w_mid, travel, z_, text, size)
+                    foot += travel * (size[0] + TEXT_ROW_GAP)
+        # under each deck its passage's walls tiled from a concrete foot up to the slab, a row of lamps along their top
+        # (Street View 2026-10-22: white tiles, lamps; the user: "er zijn tegels en lampen in de foto")
+        for d0, d1 in c.decks:
+            tt = np.arange(d0, d1 + 1e-6, 0.5)
+            fl_ = np.interp(tt, c.ts, c.floor)
+            for sign in (1.0, -1.0):
+                face = c.xy(tt, sign * (c.W / 2 - TILE_OFF))
+                under = np.array([float(np.ravel(hts.at(ROAD, x, y, sunk=False))[0])
+                                  for x, y in c.xy(tt, sign * c.W / 2)]) - DECK_T
+                z0, z1 = fl_ + TILE_FOOT, under - 0.05
+                s_ = np.r_[0, np.cumsum(np.hypot(*np.diff(face, axis=0).T))]
+                for j in range(len(tt) - 1):
+                    if z1[j] <= z0[j] + 0.5:
+                        continue
+                    q = np.array([(*face[j], z0[j]), (*face[j + 1], z0[j + 1]), (*face[j + 1], z1[j + 1]),
+                                  (*face[j], z1[j])])
+                    uv = np.array([[s_[j], z0[j]], [s_[j + 1], z0[j + 1]], [s_[j + 1], z1[j + 1]], [s_[j], z1[j]]])
+                    inward = -sign * c.n * 1.0                     # (w grows along c.n: the face looks to the middle)
+                    nrm = np.cross(q[1] - q[0], q[3] - q[0])
+                    tiles.add(q, [[0, 1, 2], [0, 2, 3]] if nrm[:2] @ inward > 0 else [[0, 2, 1], [0, 3, 2]], uv)
+                for tl_ in np.arange(d0 + LAMP_EVERY_M / 2, d1, LAMP_EVERY_M):
+                    zl = float(np.interp(tl_, tt, z1)) - LAMP_DOWN_M
+                    a_ = c.xy(tl_ - LAMP_L / 2, sign * (c.W / 2 - TILE_OFF))[0]
+                    b_ = c.xy(tl_ + LAMP_L / 2, sign * (c.W / 2 - TILE_OFF))[0]
+                    a2 = c.xy(tl_ - LAMP_L / 2, sign * (c.W / 2 - TILE_OFF - LAMP_D))[0]
+                    b2 = c.xy(tl_ + LAMP_L / 2, sign * (c.W / 2 - TILE_OFF - LAMP_D))[0]
+                    prism(lamps, np.array([a_, b_, b2, a2]), np.full(4, zl), np.full(4, zl + LAMP_H))
     # the BGT's walls beyond the trench's own (the wing walls by the decks, the park's retaining walls): each wall's
     # outline's middle line, a dark wall PARAPET_T thick, its top PARAPET_UP over the higher ground beside it (Street
     # View A200, B130: one long dark wall between the tram's grass and the sunk park); a railing on it where a path runs
