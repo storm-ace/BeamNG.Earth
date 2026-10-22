@@ -43,5 +43,51 @@ class KunstwerkTest(unittest.TestCase):
         self.assertTrue(np.isnan(z[1]))
 
 
+class FootprintTest(unittest.TestCase):
+    """What stands of ours round a kunstwerk is kept out of its floor (padded), not out of its box: the area is a
+    rotated rectangle and the box's corners reach past it."""
+
+    def setUp(self):
+        # its floor a diamond |x| + |y| <= 8 m in 1 m cells round RD (91600, 435900); its mesh the 20 x 20 m square
+        c = np.arange(-10, 10) + 0.5
+        z = np.where(np.abs(c)[None, :] + np.abs(c)[:, None] <= 8, 1.0, -999.0)
+        self.k = kunstwerken.Kunstwerk({
+            "name": "t", "origin_rd": [91600, 435900],
+            "positions": [[-10, -10, 1], [10, -10, 1], [10, 10, 1], [-10, 10, 1]], "tris": [[0, 1, 2], [0, 2, 3]],
+            "materials": ["bne_grass"], "tri_material": [0, 0],
+            "floor": {"x0": -10, "y0": -10, "nx": 20, "ny": 20, "z": z.ravel().tolist()}})
+        la, lo = ahn.rd_to_wgs(91600.0, 435900.0)
+        self.frame = geodesy.EnuFrame(float(la), float(lo))
+        self.saved, kunstwerken._all = kunstwerken._all, [self.k]
+
+    def tearDown(self):
+        kunstwerken._all = self.saved
+
+    def ll(self, x, y):
+        la, lo = ahn.rd_to_wgs(91600.0 + np.asarray(x, np.float64), 435900.0 + np.asarray(y, np.float64))
+        return np.atleast_1d(la), np.atleast_1d(lo)
+
+    def test_floor_padded_not_box(self):
+        la, lo = self.ll([0.0, 7.5, 9.5, 9.5], [0.0, 0.0, 0.0, 9.5])
+        # on it; on its rim; 1.5 m past its rim (within the pad); a box corner 6 m off it
+        self.assertEqual(kunstwerken.in_footprint(la, lo).tolist(), [True, True, True, False])
+        self.assertTrue(self.k.in_box(la[3:], lo[3:]).all())
+        la, lo = self.ll([30.0], [0.0])
+        self.assertFalse(kunstwerken.in_footprint(la, lo).any())
+
+    def test_keep_out_and_heads(self):
+        e, n, _ = self.frame.geodetic_to_enu(*self.ll([0.0, 40.0], [0.0, 0.0]), 0.0)
+        on, off = [float(e[0]), float(n[0])], [float(e[1]), float(n[1])]
+        self.assertEqual(kunstwerken.keep_out(self.frame, [on, off]).tolist(), [True, False])
+        app = lambda p: ["c1", 0.0, 0.0, 0.0, 1.0, 0.0, 0] + p + [0.5, 90.0]     # noqa: E731
+        sig = [{"j": "n1", "kind": "signal", "app": [app(on), app(off), ["c2", 0, 0, 0, 1, 0, 1, None, None, None, None]]}]
+        kunstwerken.hide_heads(self.frame, sig)
+        a = sig[0]["app"]
+        self.assertEqual(a[0][7:], [None] * 4, "no stock boom in its footprint")
+        self.assertEqual(a[0][:7], app(on)[:7], "the approach still holds the AI")
+        self.assertEqual(a[1][7:9], off, "elsewhere as before")
+        self.assertIsNone(a[2][7])
+
+
 if __name__ == "__main__":
     unittest.main()

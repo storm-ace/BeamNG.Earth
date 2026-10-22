@@ -329,6 +329,9 @@ def navgraph(aid, lat, lon, zoom, x, y, out_dir, vfs_dir, serial, left_hand, mph
     urban = _s.surface.urban if _s.surface is not None else None
     graph = navgraphmod.build(frame, feats, elev, (x, y), urban, decks=decks, widths=_s.widths, left_hand=left_hand,
                               mph=mph)
+    if getattr(_s, "bgt", None) is not None:    # (--nl-bgt: the kunstwerken stand in the road tiles, their signals too)
+        import kunstwerken as kwmod
+        kwmod.hide_heads(frame, graph["signals"])
     graph["rules"] = rules
     path = navgraphmod.write(out_dir, vfs_dir, aid, serial, graph)
     return path, len(graph["nodes"]), len(graph["edges"])
@@ -442,24 +445,18 @@ def roads_tile(aid, lat, lon, zoom, tx, ty, out_dir, vfs_dir, sidewalks, lift, b
             bw = bgtmod.walls(frame, box, _s.bgt.features(frame, tx, ty, (bgtmod.WALLS,)), dug, raw,
                               passes=passes)
             if bw and kws:              # (a kunstwerk's own walls stand there)
-                def kw_free(w):
-                    b = np.asarray(w["base"], np.float64)
-                    bla, blo, _ = frame.enu_to_geodetic(b[:, 0], b[:, 1], np.zeros(len(b)))
-                    return not any(k.in_box(np.asarray(bla), np.asarray(blo)).any() for k in kws)
-                bw = [w for w in bw if kw_free(w)]
+                bw = [w for w in bw if not kwmod.keep_out(frame, np.asarray(w["base"])[:, :2], kws).any()]
             if bw:
                 rwalls[:] = bw
             if props is not None:
                 lamps = bgtmod.lamps(frame, box, _s.bgt.features(frame, tx, ty, (bgtmod.POLES,)), polys, elev)
                 if lamps:
                     props[:] = [r for r in props if r[0] != "streetlight"] + lamps
-                if kws and props:       # (a kunstwerk's own furniture stands there: none of ours in its box)
-                    xy = np.asarray([[r[1], r[2]] for r in props], np.float64)
-                    pla, plo, _ = frame.enu_to_geodetic(xy[:, 0], xy[:, 1], np.zeros(len(xy)))
-                    inb = np.zeros(len(xy), bool)
-                    for k in kws:
-                        inb |= k.in_box(np.asarray(pla), np.asarray(plo))
-                    props[:] = [r for r, b in zip(props, inb) if not b]
+                if kws and props:       # (a kunstwerk's own furniture stands there: none of ours in its footprint)
+                    out = kwmod.keep_out(frame, [[r[1], r[2]] for r in props], kws)
+                    props[:] = [r for r, o in zip(props, out) if not o]
+            if kws and wires:           # (nor our utility wires over it: their poles are props, gone above)
+                wires[:] = [w for w in wires if not kwmod.keep_out(frame, np.asarray(w)[:, :2], kws).any()]
         except Exception as e:
             log.warning("bgt walls / lamps of tile %s_%s: %s: %s", tx, ty, type(e).__name__, e)
         if kws:                     # where a kunstwerk draws its streets, nothing of ours over them (its rails, paint)

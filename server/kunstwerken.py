@@ -25,9 +25,25 @@ log = logging.getLogger("earthd.kunstwerken")
 DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "kunstwerken")
 UV_M = 4.0                  # m per texture repeat on a kunstwerk's faces (concrete)
 BOX_PAD_M = 2.0             # m round a kunstwerk's footprint its box reaches (the BGT's walls kept out of it)
+# m round its floor its footprint reaches: what stands there of ours (the BGT's walls, props, lamps, utility wires, the
+# AI's switchable signal heads) is left out, the kunstwerk has its own. The floor, not the box: the area is a rotated
+# rectangle, its RD box took the generator's furniture out of the corners round it too (2026-10-22)
+FOOTPRINT_PAD_M = 2.0
 
 _lock = threading.Lock()
 _all = None
+
+
+def _grow(mask, r):
+    """mask with every cell within r cells of a set one set too (a disc)."""
+    out = mask.copy()
+    ny, nx = mask.shape
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            if (dx or dy) and dx * dx + dy * dy <= r * r:
+                out[max(dy, 0):ny + min(dy, 0), max(dx, 0):nx + min(dx, 0)] |= \
+                    mask[max(-dy, 0):ny + min(-dy, 0), max(-dx, 0):nx + min(-dx, 0)]
+    return out
 
 
 def _inside(ring, px, py):
@@ -56,8 +72,9 @@ class Kunstwerk:
             self.floor = np.asarray(fl["z"], np.float64).reshape(fl["ny"], fl["nx"])
             self.floor[self.floor < -900] = np.nan
             self.fx0, self.fy0 = float(fl["x0"]), float(fl["y0"])
+            self.foot = _grow(np.isfinite(self.floor), int(round(FOOTPRINT_PAD_M)))     # (1 m cells)
         else:
-            self.floor = None
+            self.floor = self.foot = None
         self.lo = self.P[:, :2].min(0) - BOX_PAD_M
         self.hi = self.P[:, :2].max(0) + BOX_PAD_M
         self._enu = {}
@@ -106,19 +123,26 @@ class Kunstwerk:
         x, y = self._rd(lat, lon)
         return (x >= self.lo[0]) & (x <= self.hi[0]) & (y >= self.lo[1]) & (y <= self.hi[1])
 
-    def floor_at(self, lat, lon):
-        """Its floor's height (the lowest road surface it draws) per point, NaN where it draws none."""
+    def _cells(self, lat, lon, grid, fill):
         x, y = self._rd(lat, lon)
         x, y = np.ravel(x), np.ravel(y)
-        out = np.full(x.shape, np.nan)
-        if self.floor is None:
+        out = np.full(x.shape, fill, grid.dtype if grid is not None else type(fill))
+        if grid is None:
             return out
-        ny, nx = self.floor.shape
+        ny, nx = grid.shape
         i = np.floor(x - self.fx0).astype(np.int64)
         j = np.floor(y - self.fy0).astype(np.int64)
         k = (i >= 0) & (i < nx) & (j >= 0) & (j < ny)
-        out[k] = self.floor[j[k], i[k]]
+        out[k] = grid[j[k], i[k]]
         return out
+
+    def floor_at(self, lat, lon):
+        """Its floor's height (the lowest road surface it draws) per point, NaN where it draws none."""
+        return self._cells(lat, lon, self.floor, np.nan)
+
+    def in_footprint(self, lat, lon):
+        """Which points lie on its floor or within FOOTPRINT_PAD_M of it."""
+        return self._cells(lat, lon, self.foot, False)
 
     def deck_top(self, lat, lon):
         x, y = self._rd(lat, lon)
@@ -184,6 +208,40 @@ def covered(lat, lon):
             idx = np.flatnonzero(b)
             out[idx] |= np.isfinite(k.floor_at(lat[idx], lon[idx]))
     return out
+
+
+def in_footprint(lat, lon, kws=None):
+    """Which points lie in a kunstwerk's footprint (its floor, FOOTPRINT_PAD_M round it); kws: the ones to ask (all)."""
+    lat, lon = np.ravel(np.asarray(lat, np.float64)), np.ravel(np.asarray(lon, np.float64))
+    out = np.zeros(lat.shape, bool)
+    for k in all_kunstwerken() if kws is None else kws:
+        b = k.in_box(lat, lon)
+        if b.any():
+            idx = np.flatnonzero(b)
+            out[idx] |= k.in_footprint(lat[idx], lon[idx])
+    return out
+
+
+def keep_out(frame, xy, kws=None):
+    """in_footprint of the frame's points xy (k, 2)."""
+    xy = np.asarray(xy, np.float64).reshape(-1, 2)
+    if not len(xy):
+        return np.zeros(0, bool)
+    la, lo, _ = frame.enu_to_geodetic(xy[:, 0], xy[:, 1], np.zeros(len(xy)))
+    return in_footprint(la, lo, kws)
+
+
+def hide_heads(frame, signals):
+    """navgraph's signals with no switchable head (the stock boom, navgraph.lua) in a kunstwerk's footprint: its own
+    signals stand there (the generator's boom stood in its lanes, 2026-10-22); the phases still hold the AI."""
+    spots = [(i, j) for i, s in enumerate(signals) for j, a in enumerate(s["app"]) if a[7] is not None]
+    if not spots or not all_kunstwerken():
+        return signals
+    hit = keep_out(frame, [signals[i]["app"][j][7:9] for i, j in spots])
+    for (i, j), h in zip(spots, hit):
+        if h:
+            signals[i]["app"][j][7:11] = [None] * 4
+    return signals
 
 
 CAP_M = 0.15                # m the terrain is kept under a kunstwerk's floor
