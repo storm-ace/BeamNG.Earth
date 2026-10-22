@@ -124,6 +124,44 @@ class JunctionTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertLess(rows[0][1], 100.0, "on the left of northbound drivers (west side)")
 
+    def test_mapped_signals_decide(self):
+        """Where signals are mapped (OSM's nodes on the approaches, a few metres before the stop line), the arms they
+        mark get them and the rule adds none: a major crossing without a mapped one has none (a mapped one 300 m
+        away), a minor T with two marked approaches has those two, out of town too."""
+        far = furniture.Mapped({furniture.G_SIGNAL: [(400.0, 100.0)]})
+        rs = [self.arm(f"a{i}", "tertiary", dx, dy) for i, (dx, dy) in enumerate([(1, 0), (-1, 0), (0, 1), (0, -1)])]
+        self.assertEqual(len(furniture.junction_props(rs, (0, 0, 256, 256))), 4, "the rule's, nothing mapped")
+        self.assertEqual(furniture.junction_props(rs, (0, 0, 256, 256), mapped=far), [], "mapped near: none here")
+        t = [self.arm("e", "residential", 1, 0), self.arm("w", "residential", -1, 0), self.arm("s", "residential", 0, -1)]
+        t = [(f, roads.Spec(10.0, "paved", False, "residential", False), p, z) for f, _, p, z in t]
+        at = furniture.Mapped({furniture.G_SIGNAL: [(112.0, 103.0), (100.0 + 3.0, 100.0 - 14.0), (400.0, 100.0)]})
+        rows = furniture.junction_props(t, (0, 0, 256, 256), mapped=at)
+        self.assertEqual([r[0] for r in rows], [furniture.G_SIGNAL] * 2)
+        self.assertEqual(sorted(round(r[1] - 100) > 0 for r in rows), [True, True], "east and south ways in")
+        self.assertEqual(furniture.junction_props(t, (0, 0, 256, 256)), [], "out of town, nothing mapped: none")
+
+    def test_mapped_signal_on_the_junction_node_and_give_way(self):
+        rs = [self.arm("e", "residential", 1, 0), self.arm("w", "residential", -1, 0), self.arm("s", "residential", 0, -1)]
+        rows = furniture.junction_props(rs, (0, 0, 256, 256), mapped=furniture.Mapped({furniture.G_SIGNAL: [(100.5, 99.8)]}))
+        self.assertEqual([r[0] for r in rows], [furniture.G_SIGNAL] * 3, "on the node: every way in")
+        rows = furniture.junction_props(rs, (0, 0, 256, 256), mapped=furniture.Mapped({furniture.G_YIELD: [(97.0, 88.0)]}))
+        self.assertEqual([r[0] for r in rows], [furniture.G_YIELD], "a mapped give-way sign, not the rule's stop")
+        self.assertLess(rows[0][2], 100.0, "on the southern stem")
+
+    def test_mapped_point_counts_for_the_nearer_junction(self):
+        # two junctions 20 m apart on a street (a divided road's carriageways): a signal on the link between them,
+        # 4 m from the southern one, is the southern junction's
+        def seg(fid, cls, a, b):
+            return (fid, roads.Spec(10.0, "paved", True, cls, False), np.array([(a[0], a[1], 0.0), (b[0], b[1], 0.0)]), 0.0)
+        rs = [seg("sw", "primary", (20, 100), (100, 100)), seg("se", "primary", (100, 100), (180, 100)),
+              seg("nw", "primary", (20, 120), (100, 120)), seg("ne", "primary", (100, 120), (180, 120)),
+              seg("s", "tertiary", (100, 100), (100, 20)), seg("link", "tertiary", (100, 100), (100, 120)),
+              seg("n", "tertiary", (100, 120), (100, 200))]
+        recs = furniture.Mapped({furniture.G_SIGNAL: [(98.0, 104.0)]}).junctions(furniture._arms(rs))
+        marked = {k: r[furniture.G_SIGNAL] for k, r in recs.items() if r[furniture.G_SIGNAL]}
+        self.assertEqual(list(marked.values()), [{("link", True)}])
+        self.assertEqual(list(marked), [(100, 100)])
+
     def test_stop_on_the_stem_of_a_minor_t(self):
         rs = [self.arm("e", "residential", 1, 0), self.arm("w", "residential", -1, 0), self.arm("s", "residential", 0, -1)]
         rows = furniture.junction_props(rs, (0, 0, 256, 256))
