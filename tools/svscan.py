@@ -1,56 +1,67 @@
 #!/usr/bin/env python3
-"""Street furniture read off Street View screenshots, set against our open data: a diagnosis, never a source
+"""Street furniture read off Street View screenshots, set against what we ship: a diagnosis, never a source
 (fork-only tool; never upstream). Claude takes the screenshots by hand in a browser (Google Maps' Street View,
 looking round a place such as the Droogleever Fortuynplein); this tool only reads the PNG files already on disk:
 no scraping, no Google API. YOLO finds the traffic lights, signs, lamp posts, poles and bollards in each shot,
-each detection becomes a compass ray from the known camera, the rays of one object from several shots are
-triangulated, and each object found is matched to OUR objects (the kunstwerk's placement.json and
-direction_signs.json) and to the open data they come from (NDW's sign register, OSM's signal nodes). The output
-says "this head belongs to that approach / this sign faces the wrong way / this sign is missing / ours is extra";
-the positions read off Google never go into the mod (project decision B1): every correction is a reference to an
-open-data object (an NDW id, an OSM node, a placement index) plus a suggested facing or approach.
+each detection becomes a ray from the known camera, the rays of one object from several panoramas are
+triangulated (in plan, and in height: every view must put it at the same height), and each object found is matched
+to OUR objects (what the kunstwerk's mesh ships: its signs, heads and poles, each tied back to its placement item or
+NDW sign) and to the open data (NDW's sign register, OSM's signal nodes, the BGT's lamp posts). The output says
+"this head belongs to that approach / this sign faces the wrong way / this sign is missing / ours is extra"; the
+positions read off Google never go into the mod (project decision B1): every correction is a reference to an
+open-data object (an NDW id, an OSM node, a BGT id, a placement index) plus a suggested facing or approach.
 
     python3 tools/svscan.py shot-meta --place droogleever --id A269 --png shot.png --url "<Street View URL>"
-    python3 tools/svscan.py detect --place droogleever [--model world|coco|both] [--conf 0.12]
-    python3 tools/svscan.py triangulate --place droogleever
+    python3 tools/svscan.py detect --place droogleever [--model world|coco|both] [--conf 0.12] [--no-mask]
+    python3 tools/svscan.py triangulate --place droogleever [--kunstwerk droogleever]
     python3 tools/svscan.py match --place droogleever --kunstwerk droogleever
     python3 tools/svscan.py annotate --place droogleever
     python3 tools/svscan.py all --place droogleever --kunstwerk droogleever
     (--root <sv dir> and --design <design dir> when not run from E:\\BeamNG\\src; or $BNE_SV_ROOT, $BNE_DESIGN)
 
 Screenshot protocol (Google Maps, Street View):
-- Take the shot of the Street View viewport only (no side panel, no browser chrome; the small overlays Maps draws
-  over the picture are fine), unzoomed by the page (browser zoom 100 %), and save it as
-  <root>/<place>/shots/<id>.png. The picture's centre must be the view's centre: crop symmetrically if at all.
+- Take the shot of the Street View viewport only (no side panel, no browser chrome), at browser zoom 100 %, and save
+  it as <root>/<place>/shots/<id>.png. The picture's centre must be the view's centre: crop symmetrically if at all.
+  The overlays Maps draws on the picture (the place card and search box top left, the buttons top right and bottom
+  right, the minimap bottom left, the logo bottom centre, the copyright line) are masked before detection (UI_MASK,
+  in pixels from the edges: set for an 800 x 500 viewport, the boxes keep their size in larger ones).
 - Copy the page's URL at that moment. Street View's URL reads
-  .../@51.9080,4.4660,3a,75y,269h,92t/data=!3m6!1e1!3m4!1s<pano id>!2e0...
-  51.9080,4.4660 the camera (the panorama's place), 3a the Street View mode, 75y the field of view (deg),
+  .../@51.9080,4.4660,3a,60y,269h,92t/data=!3m6!1e1!3m4!1s<pano id>!2e0...
+  51.9080,4.4660 the camera (the panorama's place), 3a the Street View mode, 60y the VERTICAL field of view (deg),
   269h the heading (compass deg of the picture's centre), 92t the tilt (90 = the horizon; pitch = tilt - 90),
   !1s<pano> the panorama's id. Google Earth's URLs (@lat,lon,<alt>a,<dist>d,<fov>y,<heading>h,<tilt>t) read alike.
 - `shot-meta` reads all of it from the URL and appends (or replaces) the shot's record in shots.json, with the
-  PNG's size. Maps' "y" is taken as the VERTICAL field of view (the picture widens with the window, the y stays):
-  shots.json's fov is the horizontal one, 2 atan(tan(y/2) w/h). --fov-axis h takes y as horizontal instead.
-- Use several panoramas round the place (each object wants two views or more, from spots 10 m or more apart,
-  ideally at 30 deg or more to each other) and a few headings per panorama; look at the signs' faces where
-  possible (a sign's code is read from its face; a back only says which way it does NOT face).
+  PNG's size; shots.json's fov is the horizontal one, 2 atan(tan(y/2) w/h). Measured (2026-10-22): one signal head
+  at x 755 looking 226 deg and at x 228 looking 288 deg in 800 x 500 shots at 60y: a focal length of ~425 px, so
+  60y is vertical (86 deg across); --fov-axis h takes y as horizontal instead.
+- Use several panoramas round the place (each object wants two panoramas or more, 10 m or more apart, ideally at
+  30 deg or more to each other) and a few headings per panorama; look at the signs' faces where possible.
+  Shots inside a trench or under a deck triangulate with the street's: each camera stands 2.5 m over the
+  kunstwerk's floor at its spot (its mesh's raster, else the AHN's ground), heights are NAP.
 
-Data (shared with the dashboard; keep exact), in <root>/<place>/ (root E:\\BeamNG\\design\\reference\\sv):
+Data (shared with the dashboard), in <root>/<place>/ (root E:\\BeamNG\\design\\reference\\sv):
 - shots/<id>.png; shots.json [{"id","lat","lon","heading","pitch","fov","w","h","pano"?,"taken"?}]
 - detections.json [{"shot","cls","label","conf","bbox":[x0,y0,x1,y1],"bearing","elev","sign_code"?,"sign_score"?,
-  "face"?}] (bearing, elev: deg of the box's centre; cls one of light, sign, lamp, pole, bollard; label the prompt;
-  sign_code an RVV code, "back" or "unknown"; face true where a sign's face or a head's lit lens is seen)
+  "face"?}] (bearing, elev: deg of the box's centre; cls light, sign, lamp, pole or bollard, after the shape checks;
+  label the prompt; sign_code an RVV code, "back" or "unknown"; face true where a sign's face or a head's lit lens
+  is seen, false for a sign's back)
 - objects.geojson: Points (WGS84) {"id","cls","sign_code"?,"n_views","residual_m","height_m"?,"facing"?,"shots",
-  "match":{"source","ref","dist_m"},"verdict","note"}; verdict ok | moved | missing_in_ours | extra_in_ours |
-  wrong_facing | wrong_code (null after triangulate alone, before match); our objects no detection supports but
-  some shot looked at are features too (extra_in_ours).
-- report.md: a short Dutch summary. shots_annotated/: the shots with their boxes, for people.
-The camera stands 2.5 m over the ground (the Street View car's mast); height_m is the box centre's height over the
-camera's ground. Positions use lat/lon only (a local east/north frame round the shots).
+  "match":{"source","ref","dist_m"},"verdict","note"}; n_views counts panoramas; residual_m is the rays' rms miss in
+  plan (3 views or more) or the two views' disagreement in height (2 views); source ndw | osm | bgt | placement | null
+  (placement refs: items[i] of placement.json, placement_fix[i], direction_signs[i], or kunstwerk:<what>@x,y for a
+  shipped object no item explains); verdict ok | moved | missing_in_ours | extra_in_ours | wrong_facing |
+  wrong_code (null after triangulate alone); our shipped objects no detection supports but some shot looked at are
+  features too (extra_in_ours).
+- approaches.json: per signalled approach (ref/approaches.json) the heads we ship for it, the heads seen for it,
+  and whether their facings agree. report.md: a short Dutch summary. shots_annotated/: the shots with their boxes.
 
 Accuracy, honestly: Street View's camera positions are GPS (often 1-3 m off) and the heading of a Maps URL is
 rounded to a degree, so the triangulated points are good to 1-3 m at 20 m; OK_M and MOVED_M are set for that.
-The sign classifier (colour classes + grey correlation against tools/sign_atlas.py's cells) is reliable only on
-crops of 40 px or more and on the common round/triangular signs; small or oblique crops come back "unknown".
+Two views always meet in plan: a 2-view object is kept only where the rays cross at MIN_CROSS2_DEG or more and both
+put it at the same height (HEIGHT_TOL). Lights and lamps are told apart by height (LAMP_MIN_H) after triangulating
+them together. The sign classifier (colour classes + grey correlation against tools/sign_atlas.py's cells) is
+reliable only on crops of 40 px or more and on the common round/triangular signs; small or oblique crops come back
+"unknown".
 
 Weights: ultralytics' YOLO-World (yolov8s-worldv2.pt, open vocabulary; needs the clip package:
 pip install git+https://github.com/ultralytics/CLIP.git) and COCO yolo11m.pt as the fallback, fetched from
@@ -80,23 +91,40 @@ CAM_H = 2.5                 # m: the Street View car's camera over the ground
 MAX_RANGE = 70.0            # m: a detection further than this is too small to place
 MIN_RANGE = 1.5
 MIN_CROSS_DEG = 4.0         # two rays nearer parallel than this do not fix a point
+MIN_CROSS2_DEG = 10.0       # ... and an object seen from two panoramas only wants this much
 TOL_M = 1.0                 # m: a ray supports a point passing this near it ...
 TOL_DEG = 2.0               # ... or within this angle of it, whichever is the more
+TAN_TOL = math.tan(math.radians(TOL_DEG))
 MAX_RESIDUAL = 2.5          # m: rms miss of an object's rays
-HEIGHT_TOL = 1.5            # m: the rays of one object agree on its height to this
+HEIGHT_TOL = 1.0            # m: the views of one object agree on its height to this
+MERGE_M = 2.0               # m: objects of one class this near are one
+MAX_FROM_ORIGIN = 120.0     # m: objects further from the kunstwerk's origin are left out
 OK_M = 3.0                  # m: ours this near the object found is where it is
 MOVED_M = 10.0              # m: ours this near is the same object, moved
-LOOK_M = 35.0               # m: a shot looked at our object nearer than this and inside its view
+LOOK_M = {"light": 30.0, "sign": 20.0, "pole": 20.0}   # m: a shot looked at our object nearer than this, in view
+LOOK_MIN = 2                # panoramas that looked at our object before its missing detection counts (extra_in_ours)
+MIN_H, MAX_H = -0.5, 14.0   # m: an object's height over its ground outside this is no object
 FACE_DOT = 0.2              # a camera this far (cos) in front of / behind our facing sees its face / back
+LAMP_MIN_H = 7.0            # m: a light/lamp detection's object this high (over its ground) is a lamp's luminaire
+TIE_M = 3.0                 # m: a shipped object this near a placement item comes from it
+APPROACH_M = 35.0           # m: a head serves the approach whose stop line is this near, facing its drivers
 
 # YOLO-World's prompts and the class each one counts as
-PROMPTS = {"traffic light": "light", "traffic signal head": "light", "traffic sign": "sign",
-           "road sign on pole": "sign", "street lamp": "lamp", "pole": "pole", "bollard": "bollard"}
+PROMPTS = {"traffic light": "light", "traffic signal head": "light", "street light luminaire": "lamp",
+           "lamp post": "lamp", "traffic sign": "sign", "black and white striped pole": "pole", "bollard": "bollard"}
 COCO = {"traffic light": "light", "stop sign": "sign"}
+# classes triangulated together (told apart afterwards by height)
+GROUP = {"light": "overhead", "lamp": "overhead", "sign": "sign", "pole": "pole", "bollard": "bollard"}
 WORLD_W = "yolov8s-worldv2.pt"
 COCO_W = "yolo11m.pt"
 CODE_RE = re.compile(r"^[A-L]\d+[a-z]?$")
 SIGN_MIN_SCORE = 0.55       # a sign classification under this is "unknown"
+# Google Maps' overlays on an 800 x 500 Street View (px): the place card and the search box top left, the minimap
+# bottom left, the buttons top right and bottom right, the logo bottom centre, the copyright line; in a larger
+# viewport each keeps its size and its corner (ui_boxes)
+UI_MASK = [(0, 0, 230, 35), (0, 0, 200, 110), (0, 430, 125, 500), (700, 0, 800, 35), (720, 400, 800, 500),
+           (350, 472, 450, 500), (510, 486, 800, 500)]
+UI_SIZE = (800, 500)
 
 
 # ---------------------------------------------------------------- geometry
@@ -127,16 +155,19 @@ def bearing_of(v):
     return math.degrees(math.atan2(v[0], v[1])) % 360.0
 
 
+def _basis(heading, pitch):
+    hd, p = math.radians(heading), math.radians(pitch)
+    F = np.array([math.sin(hd) * math.cos(p), math.cos(hd) * math.cos(p), math.sin(p)])    # east, north, up
+    R = np.array([math.cos(hd), -math.sin(hd), 0.0])
+    return F, R, np.cross(R, F)
+
+
 def pixel_ray(u, v, w, h, heading, pitch, fov):
     """(bearing, elev) in deg of pixel (u, v) of a w x h rectilinear picture looking along heading (compass deg),
     pitch (deg, 0 = level), with a horizontal field of view fov (deg)."""
     f = (w / 2.0) / math.tan(math.radians(fov) / 2.0)
-    x, y = u - w / 2.0, v - h / 2.0                 # right, down
-    hd, p = math.radians(heading), math.radians(pitch)
-    F = np.array([math.sin(hd) * math.cos(p), math.cos(hd) * math.cos(p), math.sin(p)])    # east, north, up
-    R = np.array([math.cos(hd), -math.sin(hd), 0.0])
-    U = np.cross(R, F)
-    d = x * R - y * U + f * F
+    F, R, U = _basis(heading, pitch)
+    d = (u - w / 2.0) * R - (v - h / 2.0) * U + f * F
     return math.degrees(math.atan2(d[0], d[1])) % 360.0, math.degrees(math.atan2(d[2], math.hypot(d[0], d[1])))
 
 
@@ -145,10 +176,7 @@ def world_to_pixel(bearing, elev, w, h, heading, pitch, fov):
     f = (w / 2.0) / math.tan(math.radians(fov) / 2.0)
     b, e = math.radians(bearing), math.radians(elev)
     d = np.array([math.sin(b) * math.cos(e), math.cos(b) * math.cos(e), math.sin(e)])
-    hd, p = math.radians(heading), math.radians(pitch)
-    F = np.array([math.sin(hd) * math.cos(p), math.cos(hd) * math.cos(p), math.sin(p)])
-    R = np.array([math.cos(hd), -math.sin(hd), 0.0])
-    U = np.cross(R, F)
+    F, R, U = _basis(heading, pitch)
     z = d @ F
     if z <= 1e-6:
         return None
@@ -193,40 +221,68 @@ def perp(x, p, b):
     return abs(float(d[0] * u[1] - d[1] * u[0]))
 
 
-TAN_TOL = math.tan(math.radians(TOL_DEG))
-
-
 def tol(r):
     return max(TOL_M, r * TAN_TOL)
 
 
+def ray_z(ray, x):
+    """The height (the camera's datum) ray puts a point at x (plan) at: its camera's plus range x tan(elev)."""
+    return ray.get("cz", CAM_H) + float(np.hypot(*(np.asarray(x) - ray["p"]))) * math.tan(math.radians(ray["elev"]))
+
+
+def crossing(rs):
+    """The widest angle (deg, up to 90) between the rays rs."""
+    best = 0.0
+    for i in range(len(rs)):
+        for j in range(i + 1, len(rs)):
+            a = abs(wrap(rs[i]["bearing"] - rs[j]["bearing"]))
+            best = max(best, min(a, 180.0 - a))
+    return best
+
+
+def accept(rs, x):
+    """(ok, residual) of rays rs (one per panorama) meeting at x: 3 views or more within MAX_RESIDUAL in plan; two
+    crossing at MIN_CROSS2_DEG or more and agreeing on the height to HEIGHT_TOL (residual: that disagreement)."""
+    if len(rs) < 2:
+        return False, None
+    if len(rs) == 2:
+        dz = abs(ray_z(rs[0], x) - ray_z(rs[1], x))
+        return crossing(rs) >= MIN_CROSS2_DEG and dz <= HEIGHT_TOL, dz
+    _, res = solve_point([r["p"] for r in rs], [r["bearing"] for r in rs])
+    return res <= MAX_RESIDUAL, res
+
+
 def triangulate(rays):
-    """Objects from rays [{"p": (e, n), "bearing", "elev", "shot", "cls", ...}]: greedy, the point most shots
-    agree on first. Returns [{"p", "cls", "rays": [indices], "residual", "height"}]."""
+    """Objects from rays [{"p": (e, n), "bearing", "elev", "cz", "shot", "station", "cls", ...}] (station: the
+    panorama; its shots count once): per class group, greedy, the point most panoramas agree on first, in plan
+    and in height. Returns [{"p", "group", "rays": [indices], "residual", "z"}] (z: the median height, the
+    cameras' datum)."""
     out = []
-    by_cls = {}
+    by_grp = {}
     for i, r in enumerate(rays):
-        by_cls.setdefault(r["cls"], []).append(i)
-    for cls, idx in by_cls.items():
-        P = np.array([rays[i]["p"] for i in idx], float).reshape(-1, 2)
-        B = np.radians([rays[i]["bearing"] for i in idx])
-        U = np.stack([np.sin(B), np.cos(B)], 1) if len(idx) else np.zeros((0, 2))
-        shot = [rays[i]["shot"] for i in idx]
+        by_grp.setdefault(GROUP.get(r["cls"], r["cls"]), []).append(i)
+    for grp, idx in by_grp.items():
+        R = [rays[i] for i in idx]
+        P = np.array([r["p"] for r in R], float).reshape(-1, 2)
+        B = np.radians([r["bearing"] for r in R])
+        U = np.stack([np.sin(B), np.cos(B)], 1) if len(R) else np.zeros((0, 2))
+        st = [r.get("station", r["shot"]) for r in R]
         cands = []
-        for a in range(len(idx)):
-            for b in range(a + 1, len(idx)):
-                if shot[a] == shot[b] or np.hypot(*(P[a] - P[b])) < 1.0:
+        for a in range(len(R)):
+            for b in range(a + 1, len(R)):
+                if st[a] == st[b] or np.hypot(*(P[a] - P[b])) < 1.0:
                     continue
-                hit = intersect(P[a], rays[idx[a]]["bearing"], P[b], rays[idx[b]]["bearing"])
+                hit = intersect(P[a], R[a]["bearing"], P[b], R[b]["bearing"])
                 if hit is None:
                     continue
                 x, t1, t2 = hit
-                if MIN_RANGE < t1 < MAX_RANGE and MIN_RANGE < t2 < MAX_RANGE:
+                if MIN_RANGE < t1 < MAX_RANGE and MIN_RANGE < t2 < MAX_RANGE \
+                        and abs(ray_z(R[a], x) - ray_z(R[b], x)) <= 2 * HEIGHT_TOL:
                     cands.append((x, a, b))
-        free = np.ones(len(idx), bool)
+        free = np.ones(len(R), bool)
 
         def support(x):
-            """Per shot the free ray nearest x that supports it: [local index]."""
+            """Per panorama the free ray nearest x that supports it, those agreeing on its height: [index]."""
             d = x[None, :] - P
             t = (d * U).sum(1)
             r = np.hypot(d[:, 0], d[:, 1])
@@ -234,13 +290,13 @@ def triangulate(rays):
             ok = free & (t > MIN_RANGE) & (r < MAX_RANGE) & (m <= np.maximum(TOL_M, r * TAN_TOL))
             best = {}
             for k in np.flatnonzero(ok):
-                if shot[k] not in best or m[k] < m[best[shot[k]]]:
-                    best[shot[k]] = k
+                if st[k] not in best or m[k] < m[best[st[k]]]:
+                    best[st[k]] = k
             ks = list(best.values())
-            if len(ks) >= 3:                         # the rays agree on its height
-                hs = np.array([CAM_H + r[k] * math.tan(math.radians(rays[idx[k]]["elev"])) for k in ks])
-                med = float(np.median(hs))
-                ks = [k for k, hh in zip(ks, hs) if abs(hh - med) <= max(HEIGHT_TOL, 0.3 * abs(med - CAM_H))]
+            if len(ks) >= 2:
+                zs = np.array([ray_z(R[k], x) for k in ks])
+                med = float(np.median(zs))
+                ks = [k for k, z in zip(ks, zs) if abs(z - med) <= HEIGHT_TOL]
             return ks
         while cands:
             best = None
@@ -250,29 +306,61 @@ def triangulate(rays):
                 ks = support(x)
                 if len(ks) < 2:
                     continue
-                y, res = solve_point([P[k] for k in ks], [rays[idx[k]]["bearing"] for k in ks])
+                y, res = solve_point([P[k] for k in ks], [R[k]["bearing"] for k in ks])
                 key = (len(ks), -res)
                 if best is None or key > best[0]:
-                    best = (key, ks)
+                    best = (key, ks, a, b)
             if best is None:
                 break
-            ks = best[1]
+            _, ks, a0, b0 = best
             for _ in range(3):                      # refine: re-solve, re-gather
-                y, res = solve_point([P[k] for k in ks], [rays[idx[k]]["bearing"] for k in ks])
+                y, _r = solve_point([P[k] for k in ks], [R[k]["bearing"] for k in ks])
                 ks2 = support(y)
                 if len(ks2) < 2 or set(ks2) == set(ks):
                     break
                 ks = ks2
-            y, res = solve_point([P[k] for k in ks], [rays[idx[k]]["bearing"] for k in ks])
+            y, _r = solve_point([P[k] for k in ks], [R[k]["bearing"] for k in ks])
+            ok, res = accept([R[k] for k in ks], y)
+            if not ok:                              # (this seed pair leads nowhere: drop it, keep its rays)
+                cands = [c for c in cands if not (c[1] == a0 and c[2] == b0)]
+                continue
             for k in ks:
                 free[k] = False
-            if res > MAX_RESIDUAL:
-                continue
-            hs = [CAM_H + np.hypot(*(y - P[k])) * math.tan(math.radians(rays[idx[k]]["elev"])) for k in ks]
-            out.append({"p": y, "cls": cls, "rays": [idx[k] for k in ks], "residual": res,
-                        "height": float(np.median(hs))})
+            out.append({"p": y, "group": grp, "rays": [idx[k] for k in ks], "residual": res,
+                        "z": float(np.median([ray_z(R[k], y) for k in ks]))})
             cands = [c for c in cands if free[c[1]] and free[c[2]]]
-    return out
+    return merge(out, rays)
+
+
+def merge(objs, rays):
+    """Objects of one group within MERGE_M as one: their rays (one per panorama, the nearest) re-solved."""
+    objs = list(objs)
+    changed = True
+    while changed:
+        changed = False
+        for i in range(len(objs)):
+            for j in range(i + 1, len(objs)):
+                a, b = objs[i], objs[j]
+                if a["group"] != b["group"] or np.hypot(*(a["p"] - b["p"])) > MERGE_M:
+                    continue
+                mid = (a["p"] + b["p"]) / 2
+                per = {}
+                for k in a["rays"] + b["rays"]:
+                    s = rays[k].get("station", rays[k]["shot"])
+                    if s not in per or perp(mid, rays[k]["p"], rays[k]["bearing"]) < \
+                            perp(mid, rays[per[s]]["p"], rays[per[s]]["bearing"]):
+                        per[s] = k
+                ks = list(per.values())
+                y, _ = solve_point([rays[k]["p"] for k in ks], [rays[k]["bearing"] for k in ks])
+                _, res = accept([rays[k] for k in ks], y)
+                objs[i] = {"p": y, "group": a["group"], "rays": ks, "residual": res if res is not None else 0.0,
+                           "z": float(np.median([ray_z(rays[k], y) for k in ks]))}
+                objs.pop(j)
+                changed = True
+                break
+            if changed:
+                break
+    return objs
 
 
 def facing_of(obj_p, views):
@@ -313,17 +401,26 @@ def parse_url(url):
     return out
 
 
+def hfov(fov_y, w, h):
+    """The horizontal field of view (deg) of a w x h picture whose vertical one is fov_y."""
+    return 2 * math.degrees(math.atan(math.tan(math.radians(fov_y) / 2) * w / h))
+
+
 def shot_record(url, sid, w, h, fov_axis="v"):
     """The shots.json record of a screenshot w x h taken at url."""
     u = parse_url(url)
-    fy = u["fov_y"]
-    fov = 2 * math.degrees(math.atan(math.tan(math.radians(fy) / 2) * w / h)) if fov_axis == "v" else fy
+    fov = hfov(u["fov_y"], w, h) if fov_axis == "v" else u["fov_y"]
     rec = {"id": sid, "lat": u["lat"], "lon": u["lon"], "heading": round(u["heading"], 2),
            "pitch": round(u["tilt"] - 90.0, 2), "fov": round(fov, 3), "w": int(w), "h": int(h)}
     if "pano" in u:
         rec["pano"] = u["pano"]
     rec["taken"] = datetime.datetime.now().isoformat(timespec="seconds")
     return rec
+
+
+def station_of(s):
+    """A shot's panorama: its pano id, else its spot to ~1 m."""
+    return s.get("pano") or f"{s['lat']:.5f},{s['lon']:.5f}"
 
 
 def load(path, default=None):
@@ -340,7 +437,26 @@ def save(path, obj):
     os.replace(tmp, path)
 
 
-# ---------------------------------------------------------------- signs
+def ui_boxes(w, h):
+    """UI_MASK's boxes (x0, y0, x1, y1) in a w x h shot: each moved with its corner (the centre's with the centre)."""
+    W, H = UI_SIZE
+    out = []
+    for x0, y0, x1, y1 in UI_MASK:
+        dx = 0 if x1 <= W / 2 else (w - W if x0 >= W / 2 else (w - W) / 2)
+        dy = 0 if y1 <= H / 2 else h - H
+        out.append((x0 + dx, y0 + dy, x1 + dx, y1 + dy))
+    return out
+
+
+def in_ui(bbox, boxes, frac=0.3):
+    """The detection's box lies frac or more in the UI."""
+    x0, y0, x1, y1 = bbox
+    area = max((x1 - x0) * (y1 - y0), 1e-6)
+    cov = sum(max(0.0, min(x1, b[2]) - max(x0, b[0])) * max(0.0, min(y1, b[3]) - max(y0, b[1])) for b in boxes)
+    return cov / area >= frac
+
+
+# ---------------------------------------------------------------- signs, shapes
 
 class SignAtlas:
     """The RVV signs of tools/sign_atlas.py's atlas (bne_signs3.png, its CELLS), each trimmed to its plate, for
@@ -432,6 +548,49 @@ def lens_lit(bgr):
     return True if lit.mean() > 0.01 else None
 
 
+def head_like(bgr):
+    """A signal head's shape: a box 1.4 to 4.5 times as tall as wide, dark (its black body), or with a lit lens."""
+    import cv2
+    if bgr is None or bgr.size == 0 or min(bgr.shape[:2]) < 4:
+        return False
+    hh, ww = bgr.shape[:2]
+    asp = hh / max(ww, 1)
+    if not 1.4 <= asp <= 4.5:
+        return False
+    v = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[..., 2]
+    core = v[:, ww // 4: ww - ww // 4 or None]
+    return bool(np.median(core) < 90 or lens_lit(bgr))
+
+
+def striped(bgr):
+    """A black-and-white ringed pole: tall, its middle column's rows alternating dark and light 4 times or more."""
+    import cv2
+    if bgr is None or bgr.size == 0:
+        return False
+    hh, ww = bgr.shape[:2]
+    if hh < 3 * ww or hh < 20:
+        return False
+    g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)[:, ww // 3: ww - ww // 3 or None].mean(1)
+    lo, hi = np.percentile(g, 15), np.percentile(g, 85)
+    if hi - lo < 60:
+        return False
+    s = np.where(g < lo + (hi - lo) * 0.35, 0, np.where(g > hi - (hi - lo) * 0.35, 1, -1))
+    s = s[s >= 0]
+    return int((np.diff(s) != 0).sum()) >= 4
+
+
+def reclassify(cls, crop):
+    """The class after the shape checks: a lamp box shaped like a head is a light, a light or a sign's back that is
+    a ringed pole is a pole, a light box much taller than a head is a pole."""
+    if cls == "lamp" and head_like(crop):
+        return "light"
+    if cls in ("sign", "light", "lamp") and striped(crop):
+        return "pole"
+    if cls == "light" and crop is not None and crop.size and crop.shape[0] > 6 * crop.shape[1]:
+        return "pole"
+    return cls
+
+
 # ---------------------------------------------------------------- detection
 
 def model(kind):
@@ -451,7 +610,7 @@ def iou(a, b):
     return i / u if u > 0 else 0.0
 
 
-def detect(place_dir, kind="world", conf=0.12, imgsz=1280, atlas=None):
+def detect(place_dir, kind="world", conf=0.12, imgsz=1280, atlas=None, mask=True):
     """detections.json of the place's shots."""
     import cv2
     shots = load(os.path.join(place_dir, "shots.json"), [])
@@ -476,24 +635,29 @@ def detect(place_dir, kind="world", conf=0.12, imgsz=1280, atlas=None):
         if (w, h) != (s["w"], s["h"]):
             print(f"{s['id']}: {w}x{h} on disk, {s['w']}x{s['h']} in shots.json (the fov is the record's)",
                   file=sys.stderr)
+        boxes = ui_boxes(w, h) if mask else []
+        seen = img.copy()
+        for b in boxes:                              # (Maps' overlays: grey, not objects)
+            seen[int(b[1]):int(math.ceil(b[3])), int(b[0]):int(math.ceil(b[2]))] = 128
         found = []
         for m, names in models:
-            r = m.predict(img, conf=conf, imgsz=imgsz, agnostic_nms=True, verbose=False)[0]
+            r = m.predict(seen, conf=conf, imgsz=imgsz, agnostic_nms=True, verbose=False)[0]
             for b, c, k in zip(r.boxes.xyxy.tolist(), r.boxes.conf.tolist(), r.boxes.cls.tolist()):
                 label = m.names[int(k)]
-                if label not in names:
+                if label not in names or in_ui(b, boxes):
                     continue
-                if any(iou(b, f["bbox"]) > 0.6 and names[label] == f["cls"] for f in found):
+                if any(iou(b, f["bbox"]) > 0.6 for f in found):
                     continue
                 found.append({"cls": names[label], "label": label, "conf": round(float(c), 3),
                               "bbox": [round(float(v), 1) for v in b]})
         for f in found:
             x0, y0, x1, y1 = f["bbox"]
+            crop = img[int(y0):int(math.ceil(y1)), int(x0):int(math.ceil(x1))]
+            f["cls"] = reclassify(f["cls"], crop)
             sx, sy = w / s["w"], h / s["h"]          # (the record's pixel grid)
             bearing, elev = pixel_ray((x0 + x1) / 2 / sx, (y0 + y1) / 2 / sy, s["w"], s["h"], s["heading"],
                                       s["pitch"], s["fov"])
             d = {"shot": s["id"], **f, "bearing": round(bearing, 3), "elev": round(elev, 3)}
-            crop = img[int(y0):int(math.ceil(y1)), int(x0):int(math.ceil(x1))]
             if f["cls"] == "sign":
                 code, score = atlas.classify(crop)
                 d["sign_code"], d["sign_score"] = code, score
@@ -506,22 +670,288 @@ def detect(place_dir, kind="world", conf=0.12, imgsz=1280, atlas=None):
     return dets
 
 
+# ---------------------------------------------------------------- the kunstwerk: its frame, ground, what it ships
+
+class Kunstwerk:
+    """A kunstwerk's frame (its origin), its ground (the mesh's floor raster, else the AHN's ground; NAP) and its
+    local RD <-> WGS84."""
+
+    def __init__(self, design, name):
+        sys.path.insert(0, os.path.join(ROOT, "server"))
+        from ahn import rd_to_wgs, wgs_to_rd
+        self._rd_to_wgs, self._wgs_to_rd = rd_to_wgs, wgs_to_rd
+        self.name = name
+        self.ref = os.path.join(design, "kunstwerken", name, "ref")
+        self.kw = load(os.path.join(ROOT, "server", "data", "kunstwerken", f"{name}.kunstwerk.json"))
+        refj = load(os.path.join(self.ref, "ref.json"))
+        src = refj or self.kw
+        self.origin_rd = src["origin_rd"]
+        self.origin_wgs = src["origin_wgs"]
+        self.features = (refj or {}).get("features", [])
+        self.floor = None
+        if self.kw and self.kw.get("floor"):
+            fl = self.kw["floor"]
+            self.floor = np.asarray(fl["z"], float).reshape(fl["ny"], fl["nx"])
+            self.floor[self.floor < -900] = np.nan
+            self.fx0, self.fy0 = fl["x0"], fl["y0"]
+        a = os.path.join(self.ref, "ahn.npz")
+        self.ahn = np.load(a) if os.path.exists(a) else None
+
+    def rd(self, lat, lon):
+        x, y = self._wgs_to_rd(lat, lon)
+        return float(x) - self.origin_rd[0], float(y) - self.origin_rd[1]
+
+    def wgs(self, x, y):
+        lat, lon = self._rd_to_wgs(self.origin_rd[0] + x, self.origin_rd[1] + y)
+        return float(lat), float(lon)
+
+    def ground(self, x, y):
+        """The ground's height (NAP) at local RD (x, y): the mesh's floor, else the AHN's ground, else 0."""
+        if self.floor is not None:
+            i, j = int(math.floor(x - self.fx0)), int(math.floor(y - self.fy0))
+            if 0 <= j < self.floor.shape[0] and 0 <= i < self.floor.shape[1] and np.isfinite(self.floor[j, i]):
+                return float(self.floor[j, i])
+        if self.ahn is not None:
+            res, x0, y1 = float(self.ahn["res"]), float(self.ahn["x0"]), float(self.ahn["y1"])
+            c, r = int((x - x0) / res), int((y1 - y) / res)
+            d = self.ahn["dtm"]
+            if 0 <= r < d.shape[0] and 0 <= c < d.shape[1] and np.isfinite(d[r, c]):
+                return float(d[r, c])
+        return 0.0
+
+
+def _clusters(pts, r, dz=None):
+    """Greedy clusters of points (n, 3) within r in plan (and dz in height): [indices]."""
+    out = []
+    cent = []
+    for i, p in enumerate(pts):
+        for k, c in enumerate(cent):
+            if math.hypot(p[0] - c[0], p[1] - c[1]) < r and (dz is None or abs(p[2] - c[2]) < dz):
+                out[k].append(i)
+                cent[k] = pts[out[k]].mean(0)
+                break
+        else:
+            out.append([i])
+            cent.append(p.copy())
+    return out
+
+
+def placement_items(ref):
+    """placement.json's items with placement_fix.json applied as tools/kunstwerk_solid.py applies it, each with
+    its ref (items[i] of placement.json; placement_fix[i] for the ones a fix adds)."""
+    items = [dict(it, _ref=f"items[{i}]") for i, it in
+             enumerate((load(os.path.join(ref, "placement.json"), {}) or {}).get("items", []))]
+    for k, fx in enumerate((load(os.path.join(ref, "placement_fix.json"), {}) or {}).get("fixes", [])):
+        if fx["action"] == "add":
+            items.append(dict({a: v for a, v in fx.items() if a not in ("action", "why")}, _ref=f"placement_fix[{k}]"))
+            continue
+        near = np.asarray(fx["near"], float)
+        cand = [i for i, it in enumerate(items) if it["module"] == fx["module"]
+                and np.hypot(*(np.asarray(it["at"]) - near)) < 2.0]
+        if not cand:
+            continue
+        i = min(cand, key=lambda i: np.hypot(*(np.asarray(items[i]["at"]) - near)))
+        if fx["action"] == "remove":
+            items.pop(i)
+        else:
+            items[i].update({a: v for a, v in fx.items() if a not in ("action", "why", "near")})
+    return items
+
+
+def mast_heads(it):
+    """The heads (x, y, height over the ground) of a placement mast with its arm, as tools/kunstwerk_props.py's
+    mast_arm() and tools/kunstwerk_solid.py build it, and its low head on the mast."""
+    lanes = int(it["mast"])
+    reach = float(it.get("reach", min(lanes * 3.25 * 0.85, 9.0)))
+    n = max(1, min(3, lanes))
+    f = np.asarray(it["facing"], float)
+    f = f / max(np.hypot(*f), 1e-9)
+    side = np.array([f[1], -f[0]]) * (-1 if it.get("arm") == "right" else 1)   # (the module's +x)
+    q = np.asarray(it["at"], float)
+    out = [(*(q + side * reach * (i + 0.6) / n), 6.4 - 0.45 + 0.35 * (i + 0.6) / n - 0.1) for i in range(n)]
+    out.append((*q, 3.3 - 0.51 - 0.05))
+    return out
+
+
+def shipped(kw, to_local):
+    """What the kunstwerk ships (its mesh, server/data/kunstwerken/<name>.kunstwerk.json) in the place's frame:
+    [{"source", "ref", "cls", "p", "z", "facing", "codes", "name"}]: its sign plates (their atlas cells), its
+    heads (the switchable ones in "signals", the masts' lenses in the mesh), its ringed poles; each tied to the
+    placement item, direction sign or NDW sign it comes from (ref), else kunstwerk:<what>@x,y. Also the open data:
+    NDW's signs, OSM's signals, the BGT's lamp posts (lichtmast)."""
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import sign_atlas as sa
+    items = placement_items(kw.ref)
+    dsigns = (load(os.path.join(kw.ref, "direction_signs.json"), {}) or {}).get("signs", [])
+    ndw = load(os.path.join(kw.ref, "ndw", "signs.json"), []) or []
+    ndw_rd = [(f, kw.rd(f["geometry"]["coordinates"][1], f["geometry"]["coordinates"][0])) for f in ndw]
+
+    def loc(x, y):
+        return to_local(*kw.wgs(x, y))
+
+    def face(x, y, f):
+        if f is None or not np.hypot(*f):
+            return None
+        return bearing_of(loc(x + f[0], y + f[1]) - loc(x, y))     # (RD's grid north is not true north)
+
+    def tie(cls, q, codes=()):
+        """(source, ref, facing) of what built the shipped object at q (local RD)."""
+        if cls == "sign":
+            for c in codes:
+                near = [(np.hypot(q[0] - p[0], q[1] - p[1]), f) for f, p in ndw_rd
+                        if f["properties"].get("rvvCode") == c]
+                near = [n for n in near if n[0] < 4.0]
+                if near:
+                    f = min(near, key=lambda n: n[0])[1]
+                    return "ndw", str(f.get("id")), None
+            for k, it in enumerate(dsigns):
+                if np.hypot(*(np.asarray(it["at"]) - q[:2])) < 2.5:
+                    return "placement", f"direction_signs[{k}]", face(*it["at"], it.get("facing"))
+        best = None
+        for it in items:
+            if it["module"] not in (("sign",) if cls == "sign" else ("traffic_light",)):
+                continue
+            pts = [np.asarray(it["at"], float)]
+            if it.get("mast") and cls == "light":
+                pts += [np.asarray(h[:2]) for h in mast_heads(it)]
+            d = min(np.hypot(*(p - q[:2])) for p in pts)
+            if d < TIE_M and (best is None or d < best[0]):
+                best = (d, it)
+        if best:
+            it = best[1]
+            return "placement", it["_ref"], face(*it["at"], it.get("facing"))
+        return "placement", f"kunstwerk:{cls}@{q[0]:.1f},{q[1]:.1f}", None
+    out = []
+    if kw.kw:
+        P = np.asarray(kw.kw["positions"], float)
+        T = np.asarray(kw.kw["tris"], np.int64)
+        UV = np.asarray(kw.kw["uvs"], float)
+        tm = np.asarray(kw.kw["tri_material"], np.int64)
+        mats = kw.kw["materials"]
+        if "bne_signs" in mats:
+            T = T[tm == mats.index("bne_signs")]
+            uv = UV[T].mean(1)
+            col = np.clip(np.floor(uv[:, 0] * sa.GRID[0]), 0, sa.GRID[0] - 1).astype(int)
+            row = sa.GRID[1] - 1 - np.clip(np.floor(uv[:, 1] * sa.GRID[1]), 0, sa.GRID[1] - 1).astype(int)
+            cell = row * sa.GRID[0] + col
+            cen = P[T].mean(1)
+
+            def mesh_face(q, behind, r):
+                """The facing of a plate or a head at q: from the middle of its back (the cell behind: a plate's
+                grey back, a head's black body) within r to q."""
+                k = np.flatnonzero((cell == sa.CELLS[behind]) & (np.linalg.norm(cen - q, axis=1) < r))
+                if not len(k):
+                    return None
+                v = q[:2] - cen[k, :2].mean(0)
+                return face(q[0], q[1], v) if np.hypot(*v) > 1e-3 else None
+            inv = {k: c for c, k in sa.CELLS.items() if CODE_RE.match(c)}
+            sel = np.flatnonzero(np.isin(cell, list(inv)))
+            for cl in _clusters(cen[sel], 0.5, 2.0):
+                k = sel[cl]
+                q = cen[k].mean(0)
+                codes = sorted({inv[c] for c in cell[k]})
+                src, ref, f = tie("sign", q, codes)
+                fac = mesh_face(q, "back", 0.6)
+                out.append({"source": src, "ref": ref, "cls": "sign", "p": loc(*q[:2]), "z": float(q[2]),
+                            "facing": fac, "codes": codes, "name": f"sign {'+'.join(codes)}"})
+            lens = [sa.CELLS[c] for c in ("lens_red", "lens_amber", "lens_green") if c in sa.CELLS]
+            sel = np.flatnonzero(np.isin(cell, lens))
+            for cl in _clusters(cen[sel], 0.45, 0.8):
+                k = sel[cl]
+                q = cen[k].mean(0)
+                src, ref, f = tie("light", q)
+                fac = mesh_face(q, "black", 0.35)
+                out.append({"source": src, "ref": ref, "cls": "light", "p": loc(*q[:2]), "z": float(q[2]),
+                            "facing": fac, "codes": [], "name": "head (mesh)"})
+            if "stripes" in sa.CELLS:
+                sel = np.flatnonzero(cell == sa.CELLS["stripes"])
+                for cl in _clusters(cen[sel], 0.6):
+                    q = cen[sel[cl]].mean(0)
+                    src, ref, _f = tie("pole", q)
+                    out.append({"source": src, "ref": ref, "cls": "pole", "p": loc(*q[:2]), "z": float(q[2]),
+                                "facing": None, "codes": [], "name": "ringed pole (mesh)"})
+        for s in kw.kw.get("signals", []):
+            q = np.asarray(s["at"], float)
+            if any(o["cls"] == "light" and np.hypot(*(o["p"] - loc(*q[:2]))) < 0.5 for o in out):
+                continue
+            src, ref, _f = tie("light", q)
+            out.append({"source": src, "ref": ref, "cls": "light", "p": loc(*q[:2]), "z": float(q[2]),
+                        "facing": face(q[0], q[1], s["facing"]), "codes": [], "name": "switchable head"})
+    else:                                           # (no mesh: the placement as planned)
+        for it in items:
+            cls = {"traffic_light": "light", "sign": "sign"}.get(it["module"])
+            if cls:
+                code = it.get("code")
+                codes = code if isinstance(code, list) else ([code] if code else [])
+                out.append({"source": "placement", "ref": it["_ref"], "cls": cls, "p": loc(*it["at"]), "z": None,
+                            "facing": face(*it["at"], it.get("facing")), "codes": codes, "name": it["module"]})
+    for f, (x, y) in ndw_rd:
+        pr = f.get("properties", {})
+        b = pr.get("bearing")
+        out.append({"source": "ndw", "ref": str(f.get("id")), "cls": "sign", "p": loc(x, y), "z": None,
+                    "facing": None if b is None else (float(b) + 180.0) % 360.0, "open": True,
+                    "codes": [pr["rvvCode"]] if pr.get("rvvCode") else [], "name": f"NDW {pr.get('rvvCode')}"})
+    seen = set()
+    for e in (load(os.path.join(kw.ref, "osm_signals.json"), {}) or {}).get("elements", []):
+        if e.get("type") == "node" and e.get("tags", {}).get("highway") == "traffic_signals":
+            seen.add(e["id"])
+            out.append({"source": "osm", "ref": f"node/{e['id']}", "cls": "light", "p": to_local(e["lat"], e["lon"]),
+                        "z": None, "facing": None, "codes": [], "name": "OSM traffic_signals", "open": True})
+    xml = os.path.join(kw.ref, "osm_map.xml")
+    if os.path.exists(xml):
+        for n in ET.parse(xml).getroot().iter("node"):
+            tags = {t.get("k"): t.get("v") for t in n.iter("tag")}
+            cls = ("light" if tags.get("highway") == "traffic_signals" else "lamp" if tags.get("highway") ==
+                   "street_lamp" else "bollard" if tags.get("barrier") == "bollard" else None)
+            nid = int(n.get("id"))
+            if cls is None or nid in seen:
+                continue
+            out.append({"source": "osm", "ref": f"node/{nid}", "cls": cls, "z": None, "open": True,
+                        "p": to_local(float(n.get("lat")), float(n.get("lon"))), "facing": None, "codes": [],
+                        "name": f"OSM {cls}"})
+    for f in kw.features:
+        if f.get("layer") == "paal" and f.get("functie") in ("lichtmast",):
+            q = np.asarray(f["rings"], float).reshape(-1, 2).mean(0)
+            out.append({"source": "bgt", "ref": f["id"], "cls": "lamp", "p": loc(*q), "z": None, "facing": None,
+                        "codes": [], "name": "BGT lichtmast", "open": True})
+    return out
+
+
+def approaches(kw, to_local):
+    """ref/approaches.json's signalled approaches: [{"name", "mid" (local), "travel" (compass deg)}]."""
+    out = []
+    for a in (load(os.path.join(kw.ref, "approaches.json"), {}) or {}).get("approaches", []):
+        L, R = to_local(*kw.wgs(*a["left"])), to_local(*kw.wgs(*a["right"]))
+        d = R - L
+        out.append({"name": a["name"], "mid": (L + R) / 2, "travel": bearing_of(np.array([-d[1], d[0]]))})
+    return out
+
+
+def approach_of(p, facing, apps):
+    """The approach a head at p facing (compass deg; None: any) speaks to: the nearest stop line within APPROACH_M
+    whose drivers it faces, and whose drivers are in front of it."""
+    best = None
+    for a in apps:
+        back = (a["travel"] + 180.0) % 360.0
+        if facing is not None and abs(wrap(facing - back)) > 60:
+            continue
+        d = float(np.hypot(*(a["mid"] - p)))
+        if d < APPROACH_M and (best is None or d < best[0]):
+            best = (d, a["name"])
+    return best[1] if best else None
+
+
 # ---------------------------------------------------------------- objects
 
-def place_frame(shots):
-    lat0 = float(np.mean([s["lat"] for s in shots]))
-    lon0 = float(np.mean([s["lon"] for s in shots]))
-    return frame(lat0, lon0)
-
-
-def rays_of(shots, dets, to_local):
+def rays_of(shots, dets, to_local, kw=None):
     by_id = {s["id"]: s for s in shots}
     rays = []
     for i, d in enumerate(dets):
         s = by_id.get(d["shot"])
         if s is None:
             continue
-        rays.append({**d, "det": i, "p": to_local(s["lat"], s["lon"])})
+        cz = CAM_H + (kw.ground(*kw.rd(s["lat"], s["lon"])) if kw else 0.0)
+        rays.append({**d, "det": i, "p": to_local(s["lat"], s["lon"]), "cz": cz, "station": station_of(s)})
     return rays
 
 
@@ -534,21 +964,39 @@ def majority_code(rs):
     return max(votes, key=votes.get) if votes else None
 
 
-def objects_of(shots, dets):
+def objects_of(shots, dets, kw=None):
     """The triangulated objects: [{"id", "cls", "p", "n_views", "residual_m", "height_m", "facing", "shots",
-    "sign_code", "rays"}] in the place's local frame, and (to_local, to_wgs, rays)."""
-    to_local, to_wgs = place_frame(shots)
-    rays = rays_of(shots, dets, to_local)
+    "sign_code", "rays", "z"}] in the place's local frame (round the kunstwerk's origin when given; objects
+    further than MAX_FROM_ORIGIN from it are left out), and (to_local, to_wgs, rays)."""
+    if kw is not None:
+        to_local, to_wgs = frame(*kw.origin_wgs)
+    else:
+        to_local, to_wgs = frame(float(np.mean([s["lat"] for s in shots])), float(np.mean([s["lon"] for s in shots])))
+    rays = rays_of(shots, dets, to_local, kw)
     objs = []
     counts = {}
     for o in triangulate(rays):
+        if kw is not None and np.hypot(*o["p"]) > MAX_FROM_ORIGIN:
+            continue
         rs = [rays[i] for i in o["rays"]]
-        counts[o["cls"]] = counts.get(o["cls"], 0) + 1
-        objs.append({"id": f"sv-{o['cls']}-{counts[o['cls']]}", "cls": o["cls"], "p": o["p"],
-                     "n_views": len(rs), "residual_m": round(o["residual"], 2), "height_m": round(o["height"], 2),
-                     "facing": facing_of(o["p"], [(r["p"], r.get("face")) for r in rs]),
-                     "shots": sorted({r["shot"] for r in rs}), "sign_code": majority_code(rs),
-                     "rays": o["rays"]})
+        g = kw.ground(*kw.rd(*to_wgs(*o["p"]))) if kw else 0.0
+        h = o["z"] - g
+        if not MIN_H <= h <= MAX_H:                 # (under the ground or in the sky: rays that met by chance)
+            continue
+        note = ""
+        if o["group"] == "overhead":                # (heads and lamps: told apart by height)
+            cls = "lamp" if h >= LAMP_MIN_H else "light"
+            labels = {r["cls"] for r in rs}
+            if cls not in labels:
+                note = f"{'/'.join(sorted(labels))} by YOLO, {cls} by its height"
+        else:
+            cls = o["group"]
+        counts[cls] = counts.get(cls, 0) + 1
+        objs.append({"id": f"sv-{cls}-{counts[cls]}", "cls": cls, "p": o["p"], "z": o["z"],
+                     "n_views": len({r["station"] for r in rs}), "residual_m": round(o["residual"], 2),
+                     "height_m": round(h, 2), "facing": facing_of(o["p"], [(r["p"], r.get("face")) for r in rs]),
+                     "shots": sorted({r["shot"] for r in rs}), "sign_code": majority_code(rs) if cls == "sign"
+                     else None, "rays": o["rays"], "note": note})
     return objs, (to_local, to_wgs, rays)
 
 
@@ -571,113 +1019,34 @@ def write_objects(place_dir, objs, to_wgs):
          {"type": "FeatureCollection", "features": [feature(o, to_wgs) for o in objs]})
 
 
-# ---------------------------------------------------------------- our objects, open data
+# ---------------------------------------------------------------- matching
 
-def ours(design, kunstwerk, to_local):
-    """Our objects and the open data round the kunstwerk, in the place's frame: [{"source", "ref", "cls", "p",
-    "facing" (compass deg or None), "codes" (list), "name"}]. source placement (placement.json items[i],
-    direction_signs.json signs[i]: what the mod builds), ndw (ref/ndw/signs.json), osm (signal nodes)."""
-    sys.path.insert(0, os.path.join(ROOT, "server"))
-    from ahn import rd_to_wgs
-    ref_dir = os.path.join(design, "kunstwerken", kunstwerk, "ref")
-    refj = load(os.path.join(ref_dir, "ref.json")) or \
-        load(os.path.join(ROOT, "server", "data", "kunstwerken", f"{kunstwerk}.kunstwerk.json"))
-    ox, oy = refj["origin_rd"]
-
-    def from_rd(x, y):
-        lat, lon = rd_to_wgs(ox + x, oy + y)
-        return to_local(float(lat), float(lon))
-
-    def facing(at, f):
-        if f is None:
-            return None
-        a = from_rd(*at)
-        b = from_rd(at[0] + f[0], at[1] + f[1])     # (RD's grid north is not true north)
-        return bearing_of(b - a)
-    out = []
-    pl = load(os.path.join(ref_dir, "placement.json"), {"items": []})
-    for i, it in enumerate(pl.get("items", [])):
-        cls = {"traffic_light": "light", "sign": "sign"}.get(it.get("module"))
-        if cls is None:
-            continue
-        code = it.get("code")
-        codes = code if isinstance(code, list) else ([code] if code else [])
-        codes += [c for c in it.get("plates", []) if c not in codes]
-        out.append({"source": "placement", "ref": f"items[{i}]", "cls": cls, "p": from_rd(*it["at"]),
-                    "facing": facing(it["at"], it.get("facing")), "codes": codes,
-                    "name": f"{it.get('module')} {it.get('role', '')} {' '.join(codes)}".strip()})
-    ds = load(os.path.join(ref_dir, "direction_signs.json"), {"signs": []})
-    for i, it in enumerate(ds.get("signs", [])):
-        codes = [a for a in it.get("args", []) if isinstance(a, str) and CODE_RE.match(a)]
-        out.append({"source": "placement", "ref": f"direction_signs[{i}]", "cls": "sign", "p": from_rd(*it["at"]),
-                    "facing": facing(it["at"], it.get("facing")), "codes": codes, "name": it.get("module")})
-    for f in load(os.path.join(ref_dir, "ndw", "signs.json"), []) or []:
-        pr = f.get("properties", {})
-        lon, lat = f["geometry"]["coordinates"][:2]
-        b = pr.get("bearing")
-        out.append({"source": "ndw", "ref": str(f.get("id") or pr.get("id") or pr.get("externalId")), "cls": "sign",
-                    "p": to_local(lat, lon), "facing": None if b is None else (float(b) + 180.0) % 360.0,
-                    "codes": [pr["rvvCode"]] if pr.get("rvvCode") else [], "name": f"NDW {pr.get('rvvCode')}"})
-    seen = set()
-    for e in (load(os.path.join(ref_dir, "osm_signals.json"), {}) or {}).get("elements", []):
-        if e.get("type") == "node" and e.get("tags", {}).get("highway") == "traffic_signals":
-            seen.add(e["id"])
-            out.append({"source": "osm", "ref": f"node/{e['id']}", "cls": "light", "p": to_local(e["lat"], e["lon"]),
-                        "facing": None, "codes": [], "name": "OSM traffic_signals"})
-    xml = os.path.join(ref_dir, "osm_map.xml")
-    if os.path.exists(xml):
-        for n in ET.parse(xml).getroot().iter("node"):
-            tags = {t.get("k"): t.get("v") for t in n.iter("tag")}
-            cls = ("light" if tags.get("highway") == "traffic_signals" else "lamp" if tags.get("highway") ==
-                   "street_lamp" else "bollard" if tags.get("barrier") == "bollard" else "sign"
-                   if tags.get("traffic_sign") else None)
-            nid = int(n.get("id"))
-            if cls is None or nid in seen:
-                continue
-            codes = [c.split(":")[-1] for c in (tags.get("traffic_sign") or "").split(";") if c]
-            out.append({"source": "osm", "ref": f"node/{nid}", "cls": cls,
-                        "p": to_local(float(n.get("lat")), float(n.get("lon"))), "facing": None, "codes": codes,
-                        "name": f"OSM {cls}"})
-    apps = []
-    for a in (load(os.path.join(ref_dir, "approaches.json"), {}) or {}).get("approaches", []):
-        L, R = from_rd(*a["left"]), from_rd(*a["right"])
-        d = R - L
-        travel = np.array([-d[1], d[0]])             # (left to right as the arriving drivers see it)
-        apps.append({"name": a["name"], "mid": (L + R) / 2, "travel": bearing_of(travel)})
-    return out, apps
+# which of our classes an object found may be: a ringed pole is a light's (or a mast's) pole
+COMPAT = {"light": ("light",), "sign": ("sign",), "pole": ("pole", "light"), "lamp": ("lamp",),
+          "bollard": ("bollard",)}
 
 
-def approach_of(p, facing, apps):
-    """The approach a head at p facing (compass deg) speaks to: the nearest stop line whose drivers it faces."""
-    best = None
-    for a in apps:
-        if facing is not None and abs(wrap(facing - (a["travel"] + 180.0))) > 60:
-            continue
-        d = float(np.hypot(*(a["mid"] - p)))
-        if d < 40 and (best is None or d < best[0]):
-            best = (d, a["name"])
-    return best[1] if best else None
-
-
-def looked_at(shots, to_local, p):
-    """The shots whose view holds p (horizontally) within LOOK_M."""
+def looked_at(shots, to_local, p, reach=30.0):
+    """The shots whose view holds p (horizontally) within reach (m)."""
     out = []
     for s in shots:
         d = p - to_local(s["lat"], s["lon"])
         r = float(np.hypot(*d))
-        if 2.0 < r < LOOK_M and abs(wrap(bearing_of(d) - s["heading"])) < s["fov"] / 2 - 2:
+        if 2.0 < r < reach and abs(wrap(bearing_of(d) - s["heading"])) < s["fov"] / 2 - 2:
             out.append(s["id"])
     return out
 
 
 def match(objs, mine, apps, shots, rays, to_local):
-    """Each object's match and verdict, and our objects no detection supports (extra_in_ours) appended."""
-    placed = [m for m in mine if m["source"] == "placement"]
+    """Each object's match and verdict (against what we ship; where we ship nothing, the open data's nearest), and
+    our shipped objects no detection supports (extra_in_ours) appended."""
+    ship = [m for m in mine if not m.get("open")]
+    opendata = [m for m in mine if m.get("open")]
     taken = set()
     pairs = []
     for oi, o in enumerate(objs):
-        for mi, m in enumerate(placed):
-            if m["cls"] == o["cls"] or {m["cls"], o["cls"]} <= {"sign", "pole"}:
+        for mi, m in enumerate(ship):
+            if m["cls"] in COMPAT.get(o["cls"], (o["cls"],)):
                 d = float(np.hypot(*(m["p"] - o["p"])))
                 if d < MOVED_M:
                     pairs.append((d, oi, mi))
@@ -687,9 +1056,9 @@ def match(objs, mine, apps, shots, rays, to_local):
             continue
         done.add(oi)
         taken.add(mi)
-        o, m = objs[oi], placed[mi]
+        o, m = objs[oi], ship[mi]
         o["match"] = {"source": m["source"], "ref": m["ref"], "dist_m": round(d, 2)}
-        notes, verdict = [m["name"]], "ok" if d <= OK_M else "moved"
+        notes, verdict = [n for n in (o.get("note"), m["name"]) if n], "ok" if d <= OK_M else "moved"
         if verdict == "moved":
             notes.append(f"ours {d:.1f} m from where the views put it")
         if m["facing"] is not None and o["cls"] in ("light", "sign"):
@@ -710,44 +1079,79 @@ def match(objs, mine, apps, shots, rays, to_local):
             a = approach_of(o["p"], o["facing"] if o["facing"] is not None else m["facing"], apps)
             if a:
                 notes.append(f"approach: {a}")
+                o["approach"] = a
         o["verdict"], o["note"] = verdict, "; ".join(notes)
     for oi, o in enumerate(objs):
         if oi in done:
             continue
-        cands = [(float(np.hypot(*(m["p"] - o["p"]))), m) for m in mine
-                 if m["source"] != "placement" and m["cls"] == o["cls"]]
+        cands = [(float(np.hypot(*(m["p"] - o["p"]))), m) for m in opendata if m["cls"] in COMPAT.get(o["cls"], ())]
         cands = [c for c in cands if c[0] < MOVED_M]
         o["verdict"] = "missing_in_ours"
+        pre = (o.get("note") + "; ") if o.get("note") else ""
         if cands:
             d, m = min(cands, key=lambda c: c[0])
             o["match"] = {"source": m["source"], "ref": m["ref"], "dist_m": round(d, 2)}
-            o["note"] = f"not in our placement; {m['name']} {m['ref']} {d:.1f} m away"
+            if m["source"] == "bgt" and d <= OK_M:
+                o["verdict"] = "ok"                 # (the BGT's lamp posts: the world builds them, not the kunstwerk)
+                o["note"] = pre + f"{m['name']} {m['ref']} {d:.1f} m away"
+            else:
+                o["note"] = pre + f"not shipped; {m['name']} {m['ref']} {d:.1f} m away"
         else:
-            o["note"] = "not in our placement nor in the open data near it"
+            o["note"] = pre + "not shipped, nor in the open data near it"
         if o["cls"] == "light":
             a = approach_of(o["p"], o["facing"], apps)
             if a:
                 o["note"] += f"; approach: {a}"
+                o["approach"] = a
     extra = []
-    for mi, m in enumerate(placed):
+    for mi, m in enumerate(ship):
         if mi in taken:
             continue
-        seen_by = looked_at(shots, to_local, m["p"])
-        if not seen_by:
+        seen_by = looked_at(shots, to_local, m["p"], LOOK_M.get(m["cls"], 20.0))
+        by = {s["id"]: station_of(s) for s in shots}
+        if len({by[i] for i in seen_by}) < LOOK_MIN:
             continue
-        single = [r for r in rays if r["cls"] == m["cls"] and r["shot"] in seen_by
+        single = [r for r in rays if r["cls"] in [c for c, v in COMPAT.items() if m["cls"] in v]
+                  and r["shot"] in seen_by
                   and perp(m["p"], r["p"], r["bearing"]) <= tol(float(np.hypot(*(m["p"] - r["p"]))))]
-        e = {"id": f"ours-{m['ref']}", "cls": m["cls"], "p": m["p"], "n_views": len({r['shot'] for r in single}),
-             "residual_m": None, "height_m": None, "facing": m["facing"], "shots": seen_by,
-             "match": {"source": m["source"], "ref": m["ref"], "dist_m": None}, "rays": []}
+        e = {"id": f"ours-{m['ref']}" + (f"-{mi}" if m["ref"].startswith("items") else ""), "cls": m["cls"],
+             "p": m["p"], "n_views": len({r['station'] for r in single}), "residual_m": None, "height_m": None,
+             "facing": m["facing"], "shots": seen_by, "rays": [],
+             "match": {"source": m["source"], "ref": m["ref"], "dist_m": None}}
         if single:
             e["verdict"] = "ok"
-            e["note"] = f"{m['name']}: on the ray of one view only ({single[0]['shot']}); not placed"
+            e["note"] = f"{m['name']}: on the ray of one panorama only ({single[0]['shot']}); not placed"
         else:
             e["verdict"] = "extra_in_ours"
             e["note"] = f"{m['name']}: in view of {len(seen_by)} shots, no detection (or hidden)"
+        if m["cls"] == "light":
+            a = approach_of(m["p"], m["facing"], apps)
+            if a:
+                e["approach"] = a
         extra.append(e)
     return objs + extra
+
+
+def approach_summary(objs, mine, apps):
+    """Per approach: the heads we ship for it, the heads seen for it, and whether their facings agree."""
+    out = []
+    for a in apps:
+        back = (a["travel"] + 180.0) % 360.0
+        ours_ = [m for m in mine if not m.get("open") and m["cls"] == "light"
+                 and approach_of(m["p"], m["facing"], apps) == a["name"]]
+        seen = [o for o in objs if o["cls"] == "light" and o.get("approach") == a["name"] and o["rays"]]
+        facing = []
+        for o in seen:
+            if o.get("facing") is not None:
+                facing.append({"id": o["id"], "facing": round(o["facing"], 1),
+                               "off_deg": round(abs(wrap(o["facing"] - back)), 1)})
+        out.append({"approach": a["name"], "drivers_heading": round(a["travel"], 1),
+                    "heads_ours": len(ours_), "ours": [m["ref"] for m in ours_],
+                    "heads_seen": len(seen), "seen": [o["id"] for o in seen],
+                    "seen_matched": [o["match"]["ref"] for o in seen if o.get("match") and o["match"]["ref"]],
+                    "facing_seen": facing,
+                    "facing_agrees": all(f["off_deg"] <= 45 for f in facing) if facing else None})
+    return out
 
 
 # ---------------------------------------------------------------- report, annotate
@@ -756,24 +1160,32 @@ VERDICT_NL = {"ok": "klopt", "moved": "verschoven", "missing_in_ours": "ontbreek
               "extra_in_ours": "extra bij ons", "wrong_facing": "verkeerd gericht", "wrong_code": "verkeerde code"}
 
 
-def report(place_dir, place, objs, n_shots, n_dets):
+def report(place_dir, place, objs, n_shots, n_dets, apps_sum=()):
     counts = {}
     for o in objs:
         counts[o["verdict"]] = counts.get(o["verdict"], 0) + 1
     lines = [f"# Street View-scan: {place}", "",
              f"{n_shots} shots, {n_dets} detecties, {sum(1 for o in objs if o['rays'])} getrianguleerde objecten. "
              "Diagnose alleen: posities uit Street View gaan niet de mod in (B1); correcties verwijzen naar "
-             "open data (NDW-id, OSM-node, placement-index).", "",
+             "open data (NDW-id, OSM-node, BGT-id, placement-index).", "",
              "| oordeel | aantal |", "|---|---|"]
-    lines += [f"| {VERDICT_NL.get(k, k)} | {v} |" for k, v in sorted(counts.items())]
-    lines += ["", "| id | soort | code | views | rest (m) | match | afstand (m) | oordeel | toelichting |",
-              "|---|---|---|---|---|---|---|---|---|"]
+    lines += [f"| {VERDICT_NL.get(k, k)} | {v} |" for k, v in sorted(counts.items(), key=lambda kv: str(kv[0]))]
+    if apps_sum:
+        lines += ["", "## Per aanrijrichting", "", "| aanrijrichting | koppen bij ons | gezien | richting klopt |",
+                  "|---|---|---|---|"]
+        for a in apps_sum:
+            fa = {True: "ja", False: "nee", None: "-"}[a["facing_agrees"]]
+            lines.append(f"| {a['approach']} | {a['heads_ours']} | {a['heads_seen']} "
+                         f"({', '.join(a['seen']) or '-'}) | {fa} |")
+    lines += ["", "| id | soort | code | views | rest (m) | hoogte (m) | match | afstand (m) | oordeel | toelichting |",
+              "|---|---|---|---|---|---|---|---|---|---|"]
     order = ["wrong_facing", "wrong_code", "missing_in_ours", "moved", "extra_in_ours", "ok"]
     for o in sorted(objs, key=lambda o: (order.index(o["verdict"]) if o["verdict"] in order else 9, o["id"])):
         m = o.get("match") or {}
         ref = f"{m.get('source')}:{m.get('ref')}" if m.get("source") else "-"
         lines.append(f"| {o['id']} | {o['cls']} | {o.get('sign_code') or '-'} | {o['n_views']} | "
-                     f"{'-' if o['residual_m'] is None else o['residual_m']} | {ref} | "
+                     f"{'-' if o['residual_m'] is None else o['residual_m']} | "
+                     f"{'-' if o.get('height_m') is None else o['height_m']} | {ref} | "
                      f"{'-' if m.get('dist_m') is None else m['dist_m']} | {VERDICT_NL.get(o['verdict'], '-')} | "
                      f"{o.get('note', '')} |")
     with open(os.path.join(place_dir, "report.md"), "w", encoding="utf-8") as f:
@@ -790,6 +1202,8 @@ def annotate(place_dir):
     objs = (load(os.path.join(place_dir, "objects.geojson"), {}) or {}).get("features", [])
     shot_obj = {}
     for f in objs:
+        if f["properties"].get("residual_m") is None:
+            continue
         for s in f["properties"]["shots"]:
             shot_obj.setdefault(s, []).append(f["properties"]["id"])
     out_dir = os.path.join(place_dir, "shots_annotated")
@@ -797,10 +1211,18 @@ def annotate(place_dir):
     by_shot = {}
     for d in dets:
         by_shot.setdefault(d["shot"], []).append(d)
-    for sid, ds in by_shot.items():
+    shots = load(os.path.join(place_dir, "shots.json"), [])
+    for s in shots:
+        sid = s["id"]
+        ds = by_shot.get(sid, [])
         img = cv2.imread(os.path.join(place_dir, "shots", sid + ".png"), cv2.IMREAD_COLOR)
         if img is None:
             continue
+        h, w = img.shape[:2]
+        shade = img.copy()
+        for b in ui_boxes(w, h):
+            cv2.rectangle(shade, (int(b[0]), int(b[1])), (int(b[2]), int(b[3])), (60, 60, 60), -1)
+        img = cv2.addWeighted(shade, 0.5, img, 0.5, 0)
         for d in ds:
             x0, y0, x1, y1 = (int(round(v)) for v in d["bbox"])
             col = COLOURS.get(d["cls"], (255, 255, 255))
@@ -808,22 +1230,24 @@ def annotate(place_dir):
             txt = f"{d['cls']} {d['conf']:.2f}"
             if d.get("sign_code"):
                 txt += f" {d['sign_code']}"
-            cv2.putText(img, txt, (x0, max(12, y0 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
-            cv2.putText(img, txt, (x0, max(12, y0 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1, cv2.LINE_AA)
-        cv2.putText(img, f"{sid}: {len(ds)} dets; objects {', '.join(shot_obj.get(sid, [])) or '-'}", (8, 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(img, txt, (x0, max(12, y0 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(img, txt, (x0, max(12, y0 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, col, 1, cv2.LINE_AA)
+        txt = f"{sid}: {len(ds)} dets; objects {', '.join(shot_obj.get(sid, [])) or '-'}"
+        cv2.putText(img, txt, (8, h - 36), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(img, txt, (8, h - 36), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
         cv2.imwrite(os.path.join(out_dir, sid + ".png"), img)
-    print(f"{out_dir}: {len(by_shot)} shots")
+    print(f"{out_dir}: {len(shots)} shots")
 
 
 # ---------------------------------------------------------------- commands
 
-def run_triangulate(place_dir):
+def run_triangulate(place_dir, design=None, kunstwerk=None):
     shots = load(os.path.join(place_dir, "shots.json"), [])
     dets = load(os.path.join(place_dir, "detections.json"), [])
-    objs, (to_local, to_wgs, rays) = objects_of(shots, dets)
+    kw = Kunstwerk(design, kunstwerk) if kunstwerk else None
+    objs, (to_local, to_wgs, rays) = objects_of(shots, dets, kw)
     for o in objs:
-        o["verdict"], o["note"] = None, "unmatched (run match)"
+        o["verdict"], o["note"] = None, (o.get("note") + "; " if o.get("note") else "") + "unmatched (run match)"
     write_objects(place_dir, objs, to_wgs)
     print(f"{len(objs)} objects from {len(dets)} detections in {len(shots)} shots")
     return objs
@@ -832,15 +1256,20 @@ def run_triangulate(place_dir):
 def run_match(place_dir, place, design, kunstwerk):
     shots = load(os.path.join(place_dir, "shots.json"), [])
     dets = load(os.path.join(place_dir, "detections.json"), [])
-    objs, (to_local, to_wgs, rays) = objects_of(shots, dets)
-    mine, apps = ours(design, kunstwerk, to_local)
+    kw = Kunstwerk(design, kunstwerk)
+    objs, (to_local, to_wgs, rays) = objects_of(shots, dets, kw)
+    mine = shipped(kw, to_local)
+    apps = approaches(kw, to_local)
     objs = match(objs, mine, apps, shots, rays, to_local)
+    summ = approach_summary(objs, mine, apps)
     write_objects(place_dir, objs, to_wgs)
-    report(place_dir, place, objs, len(shots), len(dets))
+    save(os.path.join(place_dir, "approaches.json"), summ)
+    report(place_dir, place, objs, len(shots), len(dets), summ)
     counts = {}
     for o in objs:
         counts[o["verdict"]] = counts.get(o["verdict"], 0) + 1
-    print(f"{len(objs)} objects: {counts}")
+    n_ship = sum(1 for m in mine if not m.get("open"))
+    print(f"{len(objs)} objects: {counts} (ours shipped: {n_ship})")
     return objs
 
 
@@ -862,10 +1291,13 @@ def main(argv=None):
         p.add_argument("--model", choices=("world", "coco", "both"), default="world")
         p.add_argument("--conf", type=float, default=0.12)
         p.add_argument("--imgsz", type=int, default=1280)
+        p.add_argument("--no-mask", action="store_true", help="detect in Maps' overlays too")
         if name == "all":
             p.add_argument("--kunstwerk")
             p.add_argument("--design", default=DESIGN)
-    common(sub.add_parser("triangulate"))
+    p = common(sub.add_parser("triangulate"))
+    p.add_argument("--kunstwerk")
+    p.add_argument("--design", default=DESIGN)
     p = common(sub.add_parser("match"))
     p.add_argument("--kunstwerk", required=True)
     p.add_argument("--design", default=DESIGN)
@@ -889,15 +1321,15 @@ def main(argv=None):
         save(path, shots)
         print(json.dumps(rec))
     elif a.cmd == "detect":
-        detect(place_dir, a.model, a.conf, a.imgsz)
+        detect(place_dir, a.model, a.conf, a.imgsz, mask=not a.no_mask)
     elif a.cmd == "triangulate":
-        run_triangulate(place_dir)
+        run_triangulate(place_dir, a.design, a.kunstwerk)
     elif a.cmd == "match":
         run_match(place_dir, a.place, a.design, a.kunstwerk)
     elif a.cmd == "annotate":
         annotate(place_dir)
     elif a.cmd == "all":
-        detect(place_dir, a.model, a.conf, a.imgsz)
+        detect(place_dir, a.model, a.conf, a.imgsz, mask=not a.no_mask)
         if a.kunstwerk:
             run_match(place_dir, a.place, a.design, a.kunstwerk)
         else:

@@ -121,7 +121,7 @@ def test_match_verdicts():
          "codes": [], "name": "light C"},
         # the light at (-6, 25) is only in OSM: missing_in_ours, its match the OSM node
         {"source": "osm", "ref": "node/42", "cls": "light", "p": L(-5.0, 25.5), "facing": None, "codes": [],
-         "name": "OSM traffic_signals"},
+         "name": "OSM traffic_signals", "open": True},
     ]
     apps = [{"name": "from the south", "mid": L(10.0, 15.0), "travel": 0.0}]
     out = sv.match(objs, mine, apps, shots, rays, to_local)
@@ -175,3 +175,87 @@ def test_sign_atlas_reads_its_own_cells():
         assert got == code, (code, got, score)
     grey = np.full((50, 30, 3), 128, np.uint8)
     assert atlas.classify(grey)[0] == "back"
+
+
+def test_maps_y_is_vertical_fov():
+    """The coordinator's measurement (2026-10-22): one signal head at x ~755 looking 226.17 deg and at x ~228
+    looking 288.17 deg, 800 x 500 shots at 60y: one bearing only if 60y is the vertical field of view."""
+    url = "https://www.google.com/maps/@51.9084903,4.4670114,3a,60y,226.17h,93t/data=!3m6!1e1"
+    v = sv.shot_record(url, "a", 800, 500, fov_axis="v")["fov"]
+    h = sv.shot_record(url, "a", 800, 500, fov_axis="h")["fov"]
+    assert v == pytest.approx(85.46, abs=0.05)
+    f = 400 / math.tan(math.radians(v / 2))
+    assert f == pytest.approx(425, abs=15)
+    b1 = sv.pixel_ray(755, 250, 800, 500, 226.17, 0.0, v)[0]
+    b2 = sv.pixel_ray(228, 250, 800, 500, 288.17, 0.0, v)[0]
+    assert abs(sv.wrap(b1 - b2)) < 1.5
+    b1 = sv.pixel_ray(755, 250, 800, 500, 226.17, 0.0, h)[0]
+    b2 = sv.pixel_ray(228, 250, 800, 500, 288.17, 0.0, h)[0]
+    assert abs(sv.wrap(b1 - b2)) > 10
+
+
+def _ray(p, target, shot, cls="light", cz=sv.CAM_H, dbearing=0.0):
+    d = np.asarray(target[:2], float) - np.asarray(p, float)
+    r = float(np.hypot(*d))
+    return {"p": np.asarray(p, float), "bearing": sv.bearing_of(d) + dbearing, "cz": cz, "shot": shot,
+            "station": shot, "cls": cls, "elev": math.degrees(math.atan2(target[2] - cz, r))}
+
+
+def test_two_views_need_a_wide_crossing_and_one_height():
+    t = (10.0, 30.0, 5.0)
+    wide = [_ray((0, 0), t, "a"), _ray((25, 5), t, "b")]
+    assert len(sv.triangulate(wide)) == 1
+    narrow = [_ray((0, 0), t, "a"), _ray((3, 0), t, "b")]            # ~5.5 deg apart
+    assert sv.triangulate(narrow) == []
+    bad = [_ray((0, 0), t, "a"), _ray((25, 5), (10.0, 30.0, 8.0), "b")]   # 3 m apart in height
+    assert sv.triangulate(bad) == []
+    obj = sv.triangulate(wide)[0]
+    assert obj["residual"] < 0.05                     # (two views: their disagreement in height)
+
+
+def test_trench_camera_heights_combine():
+    """A camera 4 m down (in the trench) and one on the street agree on a head's height (NAP)."""
+    t = (10.0, 30.0, 7.0)
+    rays = [_ray((0, 0), t, "a", cz=2.5), _ray((25, 5), t, "b", cz=-1.5), _ray((-10, 10), t, "c", cz=2.5)]
+    objs = sv.triangulate(rays)
+    assert len(objs) == 1 and objs[0]["z"] == pytest.approx(7.0, abs=0.05) and len(objs[0]["rays"]) == 3
+
+
+def test_same_panorama_counts_once():
+    t = (10.0, 30.0, 5.0)
+    rays = [_ray((0, 0), t, "a"), _ray((0, 0), t, "a2"), _ray((25, 5), t, "b")]
+    rays[1]["station"] = "a"
+    objs = sv.triangulate(rays)
+    assert len(objs) == 1 and len(objs[0]["rays"]) == 2
+
+
+def test_merge_near_objects():
+    objs = [{"p": np.array([10.0, 30.0]), "group": "sign", "rays": [0, 1], "residual": 0.1, "z": 3.0},
+            {"p": np.array([11.0, 30.5]), "group": "sign", "rays": [2, 3], "residual": 0.1, "z": 3.0},
+            {"p": np.array([30.0, 30.0]), "group": "sign", "rays": [4, 5], "residual": 0.1, "z": 3.0}]
+    t1, t2 = (10.0, 30.0, 3.0), (11.0, 30.5, 3.0)
+    rays = [_ray((0, 0), t1, "a", "sign"), _ray((25, 5), t1, "b", "sign"), _ray((-10, 10), t2, "c", "sign"),
+            _ray((0, 0), t2, "a", "sign"), _ray((0, 0), (30, 30, 3), "a", "sign"), _ray((25, 5), (30, 30, 3), "b",
+                                                                                      "sign")]
+    out = sv.merge(objs, rays)
+    assert len(out) == 2
+    m = min(out, key=lambda o: o["p"][0])
+    assert len(m["rays"]) == 3                        # (one per panorama: a, b, c)
+
+
+def test_lamps_and_heads_by_height():
+    cams = [(0.0, 0.0), (25.0, 4.0), (-12.0, 8.0)]
+    shots, dets = synthetic([(10.0, 20.0, 9.0, "light"), (-6.0, 25.0, 3.0, "lamp")], cams)
+    objs, _ = sv.objects_of(shots, dets)
+    by = {round(float(o["height_m"])): o["cls"] for o in objs}
+    assert by == {9: "lamp", 3: "light"}
+
+
+def test_ui_mask():
+    boxes = sv.ui_boxes(800, 500)
+    assert sv.in_ui([10, 40, 170, 100], boxes)        # the place card
+    assert sv.in_ui([735, 470, 790, 490], boxes)      # bottom right
+    assert not sv.in_ui([400, 200, 420, 240], boxes)
+    big = sv.ui_boxes(1600, 1000)
+    assert sv.in_ui([1535, 970, 1590, 990], big) and sv.in_ui([10, 940, 100, 990], big)
+    assert sv.in_ui([760, 975, 840, 995], big)        # the logo, bottom centre
