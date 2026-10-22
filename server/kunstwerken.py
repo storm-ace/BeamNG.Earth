@@ -29,6 +29,11 @@ BOX_PAD_M = 2.0             # m round a kunstwerk's footprint its box reaches (t
 # AI's switchable signal heads) is left out, the kunstwerk has its own. The floor, not the box: the area is a rotated
 # rectangle, its RD box took the generator's furniture out of the corners round it too (2026-10-22)
 FOOTPRINT_PAD_M = 2.0
+# m round a point the terrain under a kunstwerk takes the lowest floor of (cap): the terrain is a lattice of points 2 m
+# apart, and between a point on a trench's floor and one on the street over it its triangle ran across the wall and
+# stood in the trench as teeth along both walls, closing the passages under the decks (in game 2026-10-22). Kept under
+# the lowest floor within a lattice's diagonal, that slope lies under the kunstwerk's street (its columns are solid)
+CAP_REACH_M = 3
 
 _lock = threading.Lock()
 _all = None
@@ -43,6 +48,19 @@ def _grow(mask, r):
             if (dx or dy) and dx * dx + dy * dy <= r * r:
                 out[max(dy, 0):ny + min(dy, 0), max(dx, 0):nx + min(dx, 0)] |= \
                     mask[max(-dy, 0):ny + min(-dy, 0), max(-dx, 0):nx + min(-dx, 0)]
+    return out
+
+
+def _lowest(z, r):
+    """z (NaN: none) with every finite cell the lowest finite value within r cells of it (a disc); NaN stays NaN."""
+    out = z.copy()
+    ny, nx = z.shape
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            if (dx or dy) and dx * dx + dy * dy <= r * r:
+                dst = out[max(dy, 0):ny + min(dy, 0), max(dx, 0):nx + min(dx, 0)]
+                np.fmin(dst, z[max(-dy, 0):ny + min(-dy, 0), max(-dx, 0):nx + min(-dx, 0)], out=dst)
+    out[~np.isfinite(z)] = np.nan
     return out
 
 
@@ -73,8 +91,9 @@ class Kunstwerk:
             self.floor[self.floor < -900] = np.nan
             self.fx0, self.fy0 = float(fl["x0"]), float(fl["y0"])
             self.foot = _grow(np.isfinite(self.floor), int(round(FOOTPRINT_PAD_M)))     # (1 m cells)
+            self.low = _lowest(self.floor, CAP_REACH_M)
         else:
-            self.floor = self.foot = None
+            self.floor = self.foot = self.low = None
         self.lo = self.P[:, :2].min(0) - BOX_PAD_M
         self.hi = self.P[:, :2].max(0) + BOX_PAD_M
         self._enu = {}
@@ -139,6 +158,10 @@ class Kunstwerk:
     def floor_at(self, lat, lon):
         """Its floor's height (the lowest road surface it draws) per point, NaN where it draws none."""
         return self._cells(lat, lon, self.floor, np.nan)
+
+    def low_at(self, lat, lon):
+        """The lowest floor within CAP_REACH_M of each point (where it draws a floor), NaN elsewhere."""
+        return self._cells(lat, lon, self.low, np.nan)
 
     def in_footprint(self, lat, lon):
         """Which points lie on its floor or within FOOTPRINT_PAD_M of it."""
@@ -262,7 +285,7 @@ def cap(ground):
             b = k.in_box(la, lo)
             if b.any():
                 idx = np.flatnonzero(b)
-                f = k.floor_at(la[idx], lo[idx])
+                f = k.low_at(la[idx], lo[idx])     # (the lowest floor near: CAP_REACH_M)
                 m = np.isfinite(f)
                 dk = np.isfinite(k.deck_top(la[idx], lo[idx]))
                 at = m & ~dk                    # on the ground: just under it (the grading's raise or cut undone)

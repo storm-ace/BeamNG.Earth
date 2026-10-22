@@ -43,6 +43,28 @@ class KunstwerkTest(unittest.TestCase):
         self.assertTrue(np.isnan(z[1]))
 
 
+class CapTest(unittest.TestCase):
+    """The terrain under a kunstwerk: under the lowest floor within CAP_REACH_M, so the lattice's triangle between a
+    trench's floor and the street over it lies under the street, not across the trench's wall."""
+
+    def test_street_beside_a_trench_is_capped_to_its_floor(self):
+        z = np.full((20, 20), 3.0)
+        z[:, 8:12] = -2.5                                   # a trench 4 m wide, x 8..12 m
+        k = kunstwerken.Kunstwerk({
+            "name": "t", "origin_rd": [91600, 435900],
+            "positions": [[-10, -10, 3], [10, -10, 3], [10, 10, 3], [-10, 10, 3]], "tris": [[0, 1, 2], [0, 2, 3]],
+            "materials": ["bne_grass"], "tri_material": [0, 0],
+            "floor": {"x0": 0, "y0": 0, "nx": 20, "ny": 20, "z": z.ravel().tolist()}})
+        saved, kunstwerken._all = kunstwerken._all, [k]
+        try:
+            la, lo = ahn.rd_to_wgs(91600.0 + np.array([10.5, 6.5, 2.5]), 435900.0 + np.array([10.5, 10.5, 10.5]))
+            got = kunstwerken.cap(lambda a, b: np.full(np.shape(a), 3.4))(np.atleast_1d(la), np.atleast_1d(lo))
+            np.testing.assert_allclose(got, [-2.65, -2.65, 2.85], atol=1e-6,
+                                       err_msg="in the trench; the street 2 m off its wall; the street 6 m off")
+        finally:
+            kunstwerken._all = saved
+
+
 class FootprintTest(unittest.TestCase):
     """What stands of ours round a kunstwerk is kept out of its floor (padded), not out of its box: the area is a
     rotated rectangle and the box's corners reach past it."""

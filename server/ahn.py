@@ -40,7 +40,10 @@ FILL_ROUNDS = 400           # onion rings at most (200 m from a rim)
 SMOOTH_ROUNDS = 60          # then the filled cells smoothed (Jacobi) this often
 MEM_TILES = 48
 FETCH_WORKERS = 6           # tiles fetched and filled at once (Ahn.sample)
-MIN_ZOOM = 14               # AhnDem: coarser samples (the far tiles) keep the base DEM
+# AhnDem: coarser samples keep the base DEM (Mapterhorn's tiles carry the AHN too, at 2-5 m). Not 14: the far field's
+# levels from L1 sample z14 (farfield.FAR_MAX_ZOOM), and kilometres of far tiles fetched and filled 0.5 m grids, ~120
+# AHN requests a minute for 20 minutes after a teleport into Rotterdam (2026-10-22)
+MIN_ZOOM = 15
 DECK_RISE_M = 2.0           # a hole whose surface is this far over the filled ground is a deck (deck_top)
 DECK_AT_GRADE_M = 1.0          # ... and within this of the higher side round it (not a roof)
 NODATA = 1e30
@@ -264,7 +267,16 @@ class Ahn:
                 os.makedirs(self.dir, exist_ok=True)
                 tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp.npz"
                 np.savez_compressed(tmp, dtm=got[0], kind=got[1], dsm=got[2])
-                os.replace(tmp, path)
+                try:
+                    os.replace(tmp, path)
+                except PermissionError:
+                    # Windows: another process (the server and its block workers share the cache) wrote the same
+                    # tile a moment ago and is reading it: theirs stands, the same grid. The error failed the
+                    # whole block's AHN, which then fell back to the coarse DEM (2026-10-22)
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
         with self.lock:
             self.mem[(i, j)] = got
             while len(self.mem) > MEM_TILES:
