@@ -91,5 +91,80 @@ class CheckTest(unittest.TestCase):
         self.assertNotIn("double of 0", rows[2]["flags"], "back to back: two faces, not one sign twice")
 
 
+OSM = """<osm>
+ <node id="1" lat="0" lon="-1"/><node id="2" lat="0" lon="0"/><node id="3" lat="0" lon="1"/>
+ <node id="4" lat="0" lon="0.5"><tag k="highway" v="traffic_signals"/></node>
+ <node id="10" lat="-1" lon="-0.6"/><node id="11" lat="1" lon="-0.6"/>
+ <node id="20" lat="-1" lon="-0.4"/><node id="21" lat="1" lon="-0.4"/>
+ <node id="30" lat="0" lon="-5"/><node id="31" lat="0" lon="-4.6"/><node id="32" lat="0" lon="-4"/>
+ <node id="40" lat="-1" lon="-4.5"/><node id="41" lat="1" lon="-4.5"/>
+ <way id="100"><nd ref="1"/><nd ref="2"/><nd ref="4"/><nd ref="3"/>
+  <tag k="highway" v="primary"/><tag k="name" v="Weg"/></way>
+ <way id="101"><nd ref="10"/><nd ref="11"/><tag k="highway" v="footway"/></way>
+ <way id="102"><nd ref="20"/><nd ref="21"/><tag k="highway" v="cycleway"/></way>
+ <way id="103"><nd ref="30"/><nd ref="31"/><nd ref="32"/><tag k="highway" v="residential"/></way>
+ <way id="104"><nd ref="40"/><nd ref="41"/><tag k="highway" v="footway"/></way>
+</osm>"""
+
+
+def local10(e):
+    """lat/lon as tens of metres (x east, y north)."""
+    return np.array([10.0 * e["lon"], 10.0 * e["lat"]])
+
+
+class CrossingsTest(unittest.TestCase):
+    """Signalled crossings from OSM (the user 2026-10-22, "we missen stoplichten"): a road running east with a car
+    signal at x 5, a footway and a cycle path crossing it at x -6 and -4 (one crossing, 2 m apart), and a footway
+    over a side road 45 m off (no signal near: not a signalled one)."""
+
+    def test_found_merged_signalled(self):
+        cs = kp.osm_crossings(OSM, local10)
+        sig = [c for c in cs if c["signalled"]]
+        self.assertEqual(len(sig), 1)
+        c = sig[0]
+        self.assertEqual(c["kinds"], ["bike", "ped"], "the footway and its cycle path: one crossing")
+        self.assertEqual(c["way"], "100")
+        self.assertLess(abs(float(c["at"][1])), 1e-6)
+        self.assertAlmostEqual(abs(float(c["road"][0])), 1.0)
+        self.assertIn("car signal", c["why"])
+        self.assertFalse(next(c for c in cs if c["way"] == "103")["signalled"], "45 m from any signal")
+
+    def test_a_pole_at_each_kerb(self):
+        """Its poles at both kerbs (the road 8 m wide), back from them; the pedestrians' head looking across the road,
+        the cyclists' at those arriving; a cycle path's own light near one end leaves its cyclists' head out."""
+        c = next(c for c in kp.osm_crossings(OSM, local10) if c["signalled"])
+
+        def kind(x, y):
+            return np.where(np.abs(np.asarray(y)) <= 4.0, 0, 1)        # 0: the road
+        items = []
+        n, skipped = kp.crossing_lights([c], items, lambda p: True, kind, 0)
+        self.assertEqual((n, skipped), (2, []))
+        for it in items:
+            o = np.asarray(it["facing"])
+            self.assertGreater(abs(it["at"][1]), 4.0, "off the road")
+            self.assertGreater(float(o @ np.sign(it["at"])), 0.5 * abs(o[1]), "facing away from the road")
+            heads = {h["kind"]: np.asarray(h["facing"]) for h in it["heads"]}
+            self.assertLess(float(heads["ped"] @ o), -0.9, "the pedestrians' head looks across the road")
+            self.assertGreater(float(heads["bike"] @ o), 0.9, "the cyclists' at those arriving here")
+        north = next(it for it in items if it["at"][1] > 0)
+        items2 = [{"module": "traffic_light", "bike": True, "cycle": True, "at": [north["at"][0] + 2.0, 6.0],
+                   "facing": north["facing"]}]
+        kp.crossing_lights([c], items2, lambda p: True, kind, 0)
+        got = {round(it["at"][1]): [h["kind"] for h in it["heads"]] for it in items2[1:]}
+        self.assertEqual(sorted(got.values()), [["ped"], ["ped", "bike"]])
+
+    def test_coverage(self):
+        """--check's coverage: a signal node with no head near (unless a head's approach is it), a crossing with heads
+        on one side only."""
+        c = next(c for c in kp.osm_crossings(OSM, local10) if c["signalled"])
+        sigs = [("4", np.array([5.0, 0.0]), {"highway": "traffic_signals"}, [])]
+        lone, sides = kp.coverage([[-5.0, 6.0]], sigs, [c], lambda p: True)
+        self.assertEqual([x[0] for x in lone], ["4"])
+        self.assertEqual(len(sides), 1)
+        self.assertEqual(sorted(sides[0][1:]), [0, 1], "heads on one side only")
+        lone, sides = kp.coverage([[-5.0, 6.0], [-5.0, -6.0], [6.0, -9.0]], sigs, [c], lambda p: True, {"4"})
+        self.assertEqual((lone, sides), ([], []))
+
+
 if __name__ == "__main__":
     unittest.main()

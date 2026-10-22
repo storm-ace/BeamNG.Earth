@@ -158,17 +158,77 @@ local function clearHeads(keep)
   end
 end
 
+-- A signalled crossing's heads (a kunstwerk's pedestrians' and cyclists', server kunstwerken.hide_heads: "inv")
+-- show the inverse of their approach's light: green while its traffic stands at red, red while it has green or amber.
+-- They are not linked to the instance (its setLights would light them as its own): onSignalUpdate sets them.
+local inverse = {}      -- instance name -> {head key -> true}
+
+-- A plain TSStatic for an inverse head (as createSignalObject makes one, unlinked). (M.plainObject: tests)
+function M.plainObject(shape, pos)
+  local o = createObject('TSStatic')
+  o.useInstanceRenderData = false
+  o:setField('shapeName', 0, shape)
+  o:setField('dynamic', 0, 'true')
+  o:setField('collisionType', 0, 'None')
+  o:setField('decalType', 0, 'None')
+  o:setField('annotation', 0, 'TRAFFIC_SIGNALS')
+  o:registerObject()
+  local g = scenetree.AutoTrafficSignals
+  if g then g:addObject(o.obj) end
+  return o
+end
+
+-- The lenses an inverse head lights for its approach's state (lightStates: red, amber, green as the state's lights
+-- array, trafficSignals.json): its green (instanceColor2) when the traffic has red alone, else its red
+-- (instanceColor); dark when the approach has none.
+function M.inverseLights(state, lightStates)
+  if state == nil or state == 'none' then return false, false end
+  local ls = lightStates or {}
+  if not lightStates then
+    ls = { state == 'redTrafficLight' or state == 'redFlashingTrafficLight', state == 'redYellowTrafficLight', false }
+  end
+  local go = ls[1] and not ls[2]
+  return not go, go
+end
+
+local OFF, ON = '0 0 0 1', '1 1 1 1'
+
+-- core_trafficSignals' onTrafficSignalUpdate (core.lua passes it on): each changed instance's inverse heads
+function M.onSignalUpdate(results)
+  for name, r in pairs(results or {}) do
+    local hs = inverse[name]
+    if hs then
+      local red, green = M.inverseLights(r.state, r.lightStates)
+      for key in pairs(hs) do
+        local h = heads[key]
+        local o = h and scenetree.findObjectById(h.id)
+        if o then
+          o:setField('instanceColor', '0', red and ON or OFF)
+          o:setField('instanceColor1', '0', OFF)
+          o:setField('instanceColor2', '0', green and ON or OFF)
+        end
+      end
+    end
+  end
+end
+
 -- A head for instance inst at a's prop transform: the one already standing there is kept (it is linked by
 -- the instance's name, which stays the same: setupSignals finds it again), so a new graph costs only the new ones.
-local function placeHead(inst, key, x, y, z, yaw, shape)
+-- inv: a crossing's head, the inverse of the instance's light (not linked: onSignalUpdate).
+local function placeHead(inst, key, x, y, z, yaw, shape, inv)
   seenHeads[key] = true
+  if inv then
+    inverse[inst.name] = inverse[inst.name] or {}
+    inverse[inst.name][key] = true
+  end
   local h = heads[key]
   if h and math.abs(h.x - x) < 0.05 and math.abs(h.y - y) < 0.05 and scenetree.findObjectById(h.id) then return end
   if h then
     local old = scenetree.findObjectById(h.id)
     if old then old:delete() end
   end
-  local o = inst:createSignalObject(shape, vec3(x, y, z), quat(0, 0, 0, 1))
+  local o
+  if inv then o = M.plainObject(shape, vec3(x, y, z)) else o = inst:createSignalObject(shape, vec3(x, y, z), quat(0, 0, 0, 1)) end
   if not o then return end
   local m = MatrixF(true)
   m:setFromEuler(vec3(0, 0, -math.rad(yaw or 0)))       -- as trees.lua turns the static boom (negated: clockwise)
@@ -184,12 +244,13 @@ local function makeHead(inst, a)
     placeHead(inst, inst.name, a[8], a[9], a[10], a[11], type(a[12]) == 'string' and a[12] or M.SIGNAL_SHAPE)
   end
   -- a[13]: more heads that show this approach's light ({x, y, z, yaw, shape}): a kunstwerk's repeater on the median
-  -- and the heads on its poles for the cyclists beside it (kunstwerken.hide_heads); one instance switches them all
+  -- and the heads on its poles for the cyclists beside it (kunstwerken.hide_heads); one instance switches them all.
+  -- e[6] 'inv': a crossing's head across its road, the inverse of its light (onSignalUpdate)
   if type(a[13]) == 'table' then
     for k, e in ipairs(a[13]) do
       if type(e) == 'table' and e[1] then
         local shape = type(e[5]) == 'string' and e[5] or M.SIGNAL_SHAPE
-        placeHead(inst, inst.name .. '#' .. k, e[1], e[2], e[3], e[4], shape)
+        placeHead(inst, inst.name .. '#' .. k, e[1], e[2], e[3], e[4], shape, e[6] == 'inv')
       end
     end
   end
@@ -322,6 +383,7 @@ local function applySignals(nodes)
   local t1 = os.clock()
   local okS, err2 = pcall(function()
     seenHeads = {}
+    inverse = {}                            -- (makeHead names them again)
     local data, ns = signalData(nodes)
     clearHeads(seenHeads)                   -- the heads of junctions no longer in the graph
     ts.setupSignals(data, false, true)
@@ -547,6 +609,7 @@ end
 
 function M.reset()
   heads = {}            -- (the level took them with it)
+  inverse = {}
   graph, applied, dirty, lastApply, persistent, ours, foreign = nil, nil, false, -math.huge, nil, false, false
   started, respawnAll, lastGuard, heldActive = false, false, -math.huge, nil
   pendingSignals = nil

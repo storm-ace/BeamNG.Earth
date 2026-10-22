@@ -11,13 +11,16 @@ sit on the road's middle): ref/placement.json, for tools/kunstwerk_props.py's mo
   junction), facing that traffic.
 - with NDW's sign register (ref/ndw/signs.json, tools/ndw_signs.py) instead of the last two: every sign where it
   stands (ndw_signs).
+- a signalled crossing's poles (osm_crossings, crossing_lights: where OSM's paths cross its car roads near a signal):
+  one at each kerb, its pedestrians' head looking across the road, its cyclists' head at those arriving.
 
     python3 tools/kunstwerk_placement.py ../design/kunstwerken/droogleever/ref
     python3 tools/kunstwerk_placement.py ../design/kunstwerken/droogleever/ref --check \\
         [--kunstwerk server/data/kunstwerken/droogleever.kunstwerk.json [--graph]]
 
-Writes ref/placement.json: {"items": [{"module": "traffic_light" | "sign", "code": ..., "role": ..., "at": [x, y],
-"facing": [fx, fy]}]}; a light's "bike" when a cycle path runs beside it.
+Writes ref/placement.json: {"items": [{"module": "traffic_light" | "crossing_light" | "sign", "code": ..., "role": ...,
+"at": [x, y], "facing": [fx, fy]}]}; a light's "bike" when a cycle path runs beside it, a crossing pole's "heads".
+--check adds the coverage: OSM's signal nodes with no head near, signalled crossings with heads on one side only.
 """
 import argparse
 import json
@@ -180,6 +183,206 @@ def ndw_signs(feats, items, local, inside_box, road_axis, ways=(np.zeros((0, 2))
     return n_posts, n_light, skipped
 
 
+# Signalled crossings (the user 2026-10-22, "we missen stoplichten": only the cars' heads stood). OSM maps the paths
+# (footway, cycleway, path) and the car roads as ways; where a path crosses a car road at grade is a crossing. It is
+# a signalled one when the crossing node says so (crossing=traffic_signals), when the path has its own signal near it
+# (the cyclists' stop points round the Droogleever: highway=traffic_signals with traffic_signals:direction on the
+# cycleway), or when a car signal stands within CROSS_JUNCTION_M: at a Dutch signalled junction every crossing of its
+# arms is signalled (CROW; Street View P2_288 and P5_292: the crossings OSM tags "zebra" or "uncontrolled" there have
+# their pedestrians' and cyclists' heads)
+PATHS = {"footway", "cycleway", "path", "pedestrian", "bridleway"}
+CROSS_JUNCTION_M = 25.0     # m: a crossing this near a car signal is that junction's, a signalled one (at 30 m the
+                            # Baden Powelllaan's and the north side road's crossings, 26-29 m off, which Street View
+                            # does not show)
+CROSS_PATH_SIG_M = 15.0     # m: a path's own signal this near the crossing (along the path) makes it a signalled one
+CROSS_MERGE_M = 6.0         # m: crossings of one road this near each other (a zebra beside its cycle crossing: the
+                            # Westzeedijk's east arm 5.5 m, the 's-Gravendijkwal's south one 4.7 m) are one, its poles
+                            # shared
+CROSS_SAME_M = 1.5          # m: crossings of two roads this near (a road split at the crossing's node) are one
+CROSS_NODE_M = 3.0          # m: a crossing node this near a path's crossing is that one's (else a crossing of its own)
+
+
+def _xml_root(src):
+    import xml.etree.ElementTree as ET
+    return ET.fromstring(src) if src.lstrip().startswith("<") else ET.parse(src).getroot()
+
+
+def osm_crossings(src, local):
+    """The crossings of OSM's paths over its car roads at grade (osm_map.xml, or its text): [{"at": the crossing
+    point, "road": the car road's axis (a unit), "path": the crossing users' axis (a unit), "kinds": ["bike"] and/or
+    ["ped"] (a cycleway's cyclists, a footway's pedestrians; a crossing node alone: its pedestrians, and cyclists
+    with bicycle=yes), "way": the car way's id, "name": its name, "node": the crossing node's id or None,
+    "signalled": as above, "why": what says so}]."""
+    root = _xml_root(src)
+    nodes = {n.get("id"): n for n in root.findall("node")}
+    xy, ntags = {}, {}
+
+    def at(nid):
+        if nid not in xy:
+            xy[nid] = local({"lat": float(nodes[nid].get("lat")), "lon": float(nodes[nid].get("lon"))})
+        return xy[nid]
+    for nid, n in nodes.items():
+        t = {x.get("k"): x.get("v") for x in n.findall("tag")}
+        if t:
+            ntags[nid] = t
+    cars, paths = [], []
+    for w in root.findall("way"):
+        t = {x.get("k"): x.get("v") for x in w.findall("tag")}
+        hw = t.get("highway")
+        if t.get("layer", "0") != "0" or t.get("tunnel") not in (None, "no") or t.get("bridge") not in (None, "no"):
+            continue
+        refs = [r.get("ref") for r in w.findall("nd") if r.get("ref") in nodes]
+        if len(refs) < 2:
+            continue
+        if hw in OSM_CARS:
+            cars.append((w.get("id"), t, refs))
+        elif hw in PATHS:
+            paths.append((w.get("id"), t, refs))
+    car_sigs = np.array([at(r) for _, _, refs in cars for r in refs
+                         if ntags.get(r, {}).get("highway") == "traffic_signals"]).reshape(-1, 2)
+    out = []
+    for cid, ct, crefs in cars:
+        C = np.array([at(r) for r in crefs])
+        for pid, pt, prefs in paths:
+            P = np.array([at(r) for r in prefs])
+            kind = "bike" if pt.get("highway") == "cycleway" or pt.get("bicycle") == "designated" else "ped"
+            for i in range(len(C) - 1):
+                a, d = C[i], C[i + 1] - C[i]
+                for j in range(len(P) - 1):
+                    b, e = P[j], P[j + 1] - P[j]
+                    den = d[0] * e[1] - d[1] * e[0]
+                    if abs(den) < 1e-9:
+                        continue
+                    q = b - a
+                    s = (q[0] * e[1] - q[1] * e[0]) / den
+                    u = (q[0] * d[1] - q[1] * d[0]) / den
+                    if not (-1e-6 <= s <= 1 + 1e-6 and -1e-6 <= u <= 1 + 1e-6):
+                        continue
+                    X = a + d * s
+                    # the path's own signals near it, its crossing node
+                    psig = [r for r in prefs if ntags.get(r, {}).get("highway") == "traffic_signals"
+                            and np.hypot(*(at(r) - X)) <= CROSS_PATH_SIG_M]
+                    cnode = next((r for r in crefs if ntags.get(r, {}).get("highway") == "crossing"
+                                  and np.hypot(*(at(r) - X)) <= CROSS_NODE_M), None)
+                    # (a crossing node: its pedestrians cross there too, a zebra's or a signalled one's)
+                    kinds = [kind] + (["ped"] if cnode and ntags[cnode].get("crossing") not in (None, "no") else [])
+                    out.append({"at": X, "road": unit(d), "path": unit(e), "kinds": kinds, "way": cid,
+                                "name": ct.get("name", "?"), "node": cnode, "path_way": pid, "psig": psig})
+    # crossing nodes on a car road with no path mapped over it (its sidewalks as the road's tags): across the road
+    for cid, ct, crefs in cars:
+        for i, r in enumerate(crefs):
+            t = ntags.get(r, {})
+            if t.get("highway") != "crossing" or t.get("crossing") == "no":
+                continue
+            if any(o["way"] == cid and np.hypot(*(o["at"] - at(r))) <= CROSS_NODE_M for o in out):
+                continue
+            d = unit(at(crefs[min(i + 1, len(crefs) - 1)]) - at(crefs[max(i - 1, 0)]))
+            kinds = ["ped"] + (["bike"] if t.get("bicycle") in ("yes", "designated") else [])
+            out.append({"at": at(r), "road": d, "path": np.array([-d[1], d[0]]), "kinds": kinds, "way": cid,
+                        "name": ct.get("name", "?"), "node": r, "path_way": None, "psig": []})
+    # one road's crossings this near each other: one crossing (a footway beside its cycle path)
+    merged = []
+    for c in out:
+        for m in merged:
+            dd = float(np.hypot(*(m["at"] - c["at"])))
+            if (m["way"] == c["way"] and dd <= CROSS_MERGE_M) or dd <= CROSS_SAME_M:
+                m["kinds"] = sorted(set(m["kinds"]) | set(c["kinds"]))
+                m["psig"] = m["psig"] + c["psig"]
+                m["node"] = m["node"] or c["node"]
+                break
+        else:
+            merged.append(dict(c, kinds=sorted(c["kinds"])))
+    for c in merged:
+        t = ntags.get(c["node"], {}) if c["node"] else {}
+        near = np.hypot(*(car_sigs - c["at"]).T) if len(car_sigs) else np.array([np.inf])
+        if t.get("crossing") == "traffic_signals" or t.get("crossing:signals") == "yes":
+            c["signalled"], c["why"] = True, f"crossing n{c['node']}: traffic_signals"
+        elif c["psig"]:
+            c["signalled"], c["why"] = True, "the path's signal n" + "/".join(sorted(set(c["psig"])))
+        elif near.min() <= CROSS_JUNCTION_M:
+            c["signalled"], c["why"] = True, f"a car signal {near.min():.0f} m off: the junction's"
+        else:
+            c["signalled"], c["why"] = False, ""
+        del c["psig"]
+    return merged
+
+
+CROSS_REACH_M = 20.0        # m along the path from the crossing its carriageway's kerbs are looked for
+CROSS_ON_ROAD_M = 4.0       # m: the carriageway must be this near the crossing point (OSM's line against the BGT's)
+CROSS_POLE_OUT_M = 0.8      # m a crossing's pole stands back from its kerb
+CROSS_POLE_SIDE_M = 0.6     # m and to the right of the users arriving there (the crossing's middle stays clear)
+CROSS_HAS_BIKE_M = 6.0      # m: a cycle path's own light (its cyclists' head) this near an end serves its cyclists
+                            # (the north arm's, read off Street View: 4.9 m from the crossing's kerb)
+
+
+def crossing_lights(crossings, items, inside_box, edge_kind, ROAD, others=()):
+    """A pole at each kerb of each signalled crossing (osm_crossings) inside the box: items "crossing_light", "facing"
+    away from the road (toward those who arrive here: its buttons), its "heads": [{"kind": "ped" (the pedestrians'
+    head, looking across the road at the far kerb's pedestrians: a Dutch pedestrians' head stands across the road from
+    those it speaks to) or "bike" (the cyclists' head, looking at the cyclists arriving at this kerb: theirs stands at
+    their stop line, nearside), "facing", "across": the axis of the road crossed (the game shows them the inverse of
+    its traffic: server kunstwerken.hide_heads)}]. The kerbs: along the crossing users' axis the ends of the
+    carriageway's run nearest the crossing point (edge_kind: the plan's kind of ground). A cycle path's own light near
+    an end (OSM's cyclists' stop point: its cyclists' head is there; items, or others: placement_fix.json's) leaves out
+    the cyclists' head there; two ends on one spot (a median) are one pole. Returns (poles, ends left out)."""
+    s = np.arange(-CROSS_REACH_M, CROSS_REACH_M + 1e-9, 0.2)
+    n0, skipped = len(items), []
+    for c in crossings:
+        if not c.get("signalled") or not inside_box(c["at"]):
+            continue
+        X, v = np.asarray(c["at"], np.float64), unit(c["path"])
+        road = edge_kind(*(X + np.outer(s, v)).T) == ROAD
+        runs = []
+        k = 0
+        while k < len(s):
+            if road[k]:
+                k1 = k
+                while k1 + 1 < len(s) and road[k1 + 1]:
+                    k1 += 1
+                runs.append((s[k], s[k1]))
+                k = k1 + 1
+            else:
+                k += 1
+        runs = [r for r in runs if min(abs(r[0]), abs(r[1])) <= CROSS_ON_ROAD_M or r[0] <= 0 <= r[1]]
+        if not runs:
+            skipped.append((c["name"], [round(float(x), 1) for x in X], "no carriageway"))
+            continue
+        lo, hi = min(runs, key=lambda r: 0 if r[0] <= 0 <= r[1] else min(abs(r[0]), abs(r[1])))
+        for t_end, sg in ((hi, 1.0), (lo, -1.0)):
+            if abs(t_end) >= CROSS_REACH_M - 0.3:
+                skipped.append((c["name"], [round(float(x), 1) for x in X], "no kerb"))
+                continue
+            o = v * sg                                          # away from the road: toward those who arrive here
+            E = X + v * t_end
+            right = np.array([-o[1], o[0]])                     # (the right of those walking -o, toward the road)
+            q = E + o * CROSS_POLE_OUT_M + right * CROSS_POLE_SIDE_M
+            if not inside_box(q):
+                continue
+            ped, bike = "ped" in c["kinds"], "bike" in c["kinds"]
+            if bike and any(it["module"] == "traffic_light" and it.get("bike")
+                            and np.hypot(*(np.asarray(it["at"]) - q)) < CROSS_HAS_BIKE_M
+                            and float(np.dot(it["facing"], o)) > 0.5 for it in list(items) + list(others)):
+                bike = False
+            across = [round(float(x), 4) for x in unit(c["road"])]
+            heads = ([{"kind": "ped", "facing": [round(float(x), 4) for x in -o], "across": across}] if ped else []) \
+                + ([{"kind": "bike", "facing": [round(float(x), 4) for x in o], "across": across}] if bike else [])
+            if not heads:
+                continue
+            # a pole near (the median between a road's two carriageways: each crossing's end on it): one pole, its
+            # heads each way
+            same = next((it for it in items[n0:] if np.hypot(*(np.asarray(it["at"]) - q)) < DEDUP_M), None)
+            if same is not None:
+                for h in heads:
+                    if not any(g["kind"] == h["kind"] and np.dot(g["facing"], h["facing"]) > 0.7
+                               for g in same["heads"]):
+                        same["heads"].append(h)
+                continue
+            items.append({"module": "crossing_light", "role": "crossing", "at": [round(float(x), 3) for x in q],
+                          "facing": [round(float(x), 4) for x in o], "heads": heads, "way": c["way"],
+                          "node": c["node"], "why": c["why"]})
+    return len(items) - n0, skipped
+
+
 def load_items(ref_dir):
     """ref/placement.json's items with ref/placement_fix.json's corrections applied (read off Street View: each matched
     to the item of its module nearest its "near", within 2 m; "add" ones appended), as tools/kunstwerk_solid.py puts
@@ -289,6 +492,14 @@ def check_items(items, ways, sigs):
         elif it["module"] in ("traffic_light", "head"):
             code = it.get("code", "head") if it["module"] == "head" else "light"
         against = bool(set(code.split("+")) & AGAINST)
+        if it["module"] == "crossing_light" or code.startswith("crossing"):
+            # (a crossing's pole and heads look along its path, across the traffic: coverage() checks them)
+            heads_ = it.get("heads") or ()
+            rows.append({"i": i, "module": it["module"],
+                         "code": code if heads_ == () else "crossing " + "+".join(h["kind"] for h in heads_),
+                         "at": [round(float(v), 1) for v in p], "facing": f, "way": f"crossing w{it.get('way', '?')}",
+                         "travel": None, "face_err": None, "approach": None, "flags": []})
+            continue
         best = None
         for wid, t, A, B, dirs in ways:
             d = B - A
@@ -348,6 +559,51 @@ def check_items(items, ways, sigs):
     return rows
 
 
+COVER_M = 6.0           # m: an OSM signal node with no head this near is one we left out
+CROSS_SIDE_W = 8.0      # m beside a crossing's line (along its road) its heads stand
+
+
+def coverage(heads, sigs, crossings, inside, served=()):
+    """--check's coverage (the user 2026-10-22: "we missen stoplichten"): the OSM signal nodes inside the kunstwerk
+    (inside) with no head within COVER_M nor one whose approach it is (served: node ids, check_items' "approach";
+    a car signal stands on the middle of its road, the head at its kerb: 7 to 12 m off on the Droogleever's four
+    lanes) ([(node id, point, tags, distance to the nearest head)]), and its signalled
+    crossings (osm_crossings) with heads on one side only or none ([(crossing, heads on its + side, on its - side)]:
+    + is along its "path" axis; a head counts for a side within CROSS_SIDE_W of the crossing's line, 0.5 to
+    CROSS_REACH_M out). heads: [(x, y)]. Pure."""
+    H = np.asarray(heads, np.float64).reshape(-1, 2)
+    lone = []
+    for nid, q, nt, _ in sigs:
+        if not inside(q):
+            continue
+        d = float(np.hypot(*(H - q).T).min()) if len(H) else np.inf
+        if d > COVER_M and nid not in served:
+            lone.append((nid, q, nt, d))
+    sides = []
+    for c in crossings:
+        if not c.get("signalled") or not inside(c["at"]):
+            continue
+        r = H - np.asarray(c["at"], np.float64)
+        out_, beside = r @ unit(c["path"]), np.abs(r @ unit(c["road"]))
+        ok = beside <= CROSS_SIDE_W
+        n_p = int((ok & (out_ >= 0.5) & (out_ <= CROSS_REACH_M)).sum())
+        n_m = int((ok & (out_ <= -0.5) & (out_ >= -CROSS_REACH_M)).sum())
+        if not (n_p and n_m):
+            sides.append((c, n_p, n_m))
+    return lone, sides
+
+
+def print_coverage(lone, sides, title):
+    print(f"\n{title}: coverage: {len(lone)} OSM signal nodes with no head within {COVER_M:.0f} m, {len(sides)} "
+          f"signalled crossings with heads on one side only or none")
+    for nid, q, nt, d in lone:
+        what = nt.get("crossing") if nt.get("highway") == "crossing" else nt.get("traffic_signals:direction", "")
+        print(f"  n{nid} at {q[0]:6.1f},{q[1]:6.1f}  {what or '':<10} nearest head {d:5.1f} m")
+    for c, n_p, n_m in sides:
+        print(f"  crossing of {c['name'][:24]} (w{c['way']}) at {c['at'][0]:6.1f},{c['at'][1]:6.1f} "
+              f"{'+'.join(c['kinds']):<9} heads {n_p} / {n_m} ({c['why']})")
+
+
 def print_check(rows, title):
     print(f"\n{title}: {len(rows)} items, {sum(1 for r in rows if r['flags'])} flagged")
     print(f"{'#':>3} {'item':<14} {'at':>13}  {'way':<46} {'travel':>13} {'face':>5} {'ndw':>4}  {'approach':<26} "
@@ -377,10 +633,39 @@ def check_main(ref_dir, kunstwerk=None, graph=False):
     rows = check_items(items, ways, sigs)
     print_check(rows, os.path.join(ref_dir, "placement.json"))
     out = {"placement": rows}
+    # coverage: within the kunstwerk's area (kunstwerk_solid's: where its furniture stands)
+    import kunstwerk_solid as ks
+    from kunstwerk_design import carriageways
+    ks.REF_DIR[:] = [ref_dir]
+    (c0, u, n), _ = carriageways(ref_dir)
+
+    def inside(q):
+        d = np.asarray(q, np.float64) - c0
+        return bool(ks.AREA_T[0] <= d @ u <= ks.AREA_T[1] and abs(d @ n) <= ks.AREA_W)
+    crossings = osm_crossings(os.path.join(ref_dir, "osm_map.xml"), local)
+
+    def cover(points, title, rows_):
+        # (a signal is served by every head within OSM_MATCH_M that looks at one of its ways in, not only the head
+        # whose nearest it is: the S junction's west approach's head is nearer the cycle path's signal beside it)
+        served = set()
+        for r in rows_:
+            if r["module"] not in ("traffic_light", "head") or r["code"].startswith("crossing"):
+                continue
+            p, f = np.asarray(r["at"], np.float64), unit(r["facing"])
+            served |= {nid for nid, q, _, ins in sigs if np.hypot(*(q - p)) <= OSM_MATCH_M
+                       and any(float(f @ -h) > 0.7 for _, h in ins)}
+        lone, sides = coverage(points, sigs, crossings, inside, served)
+        print_coverage(lone, sides, title)
+        return [{"flags": [f"n{nid}: no head within {COVER_M:.0f} m"]} for nid, *_ in lone] + \
+            [{"flags": [f"crossing w{c['way']} at {c['at'][0]:.0f},{c['at'][1]:.0f}: heads {a_} / {b_}"]}
+             for c, a_, b_ in sides]
+    out["coverage"] = cover([it["at"][:2] for it in items if it["module"] in ("traffic_light", "crossing_light")],
+                            os.path.join(ref_dir, "placement.json") + "'s poles", rows)
     if kunstwerk:
         kw = json.load(open(kunstwerk, encoding="utf-8"))
         heads = [{"module": "head", "at": s["at"][:2], "facing": s["facing"],
-                  "code": "bike head" if s.get("bike") else "cycle head" if s.get("cycle") else "head"}
+                  "code": "crossing " + s["crossing"] if s.get("crossing") else "bike head" if s.get("bike")
+                  else "cycle head" if s.get("cycle") else "head"}
                  for s in kw.get("signals", ())]
         hrows = check_items(heads, ways, sigs)
         if graph:
@@ -391,6 +676,7 @@ def check_main(ref_dir, kunstwerk=None, graph=False):
                     r["ai"] = got
         print_check(hrows, kunstwerk + " (its switchable heads)")
         out["heads"] = hrows
+        out["coverage_heads"] = cover([s["at"][:2] for s in kw.get("signals", ())], kunstwerk + "'s heads", hrows)
     return out
 
 
@@ -430,9 +716,12 @@ def graph_heads(kunstwerk_path):
         for s in sig:
             for a in s["app"]:
                 kind = "app" if id(a) in before else "made"
-                for n, hh in enumerate([a[7:12]] + (a[12] if len(a) > 12 else [])):
-                    if hh[0] is not None:
-                        got.append((hh[0], hh[1], kind if n == 0 or kind == "made" else "app+"))
+                for n, hh in enumerate([a[7:12]] + (a[12] if len(a) > 12 and a[12] else [])):
+                    if hh[0] is None:
+                        continue
+                    # ("inv": a crossing's head, the inverse of this approach's light)
+                    got.append((hh[0], hh[1], "inv" if len(hh) > 5 and hh[5] == "inv"
+                                else kind if n == 0 or kind == "made" else "app+"))
         return [next((k for gx, gy, k in got if abs(gx - x) < 0.05 and abs(gy - y) < 0.05), "")
                 for x, y, *_ in kw.heads(frame)]
     finally:
@@ -731,6 +1020,12 @@ def main(argv=None):
                     n_osm += len(items) - n0
         n_mast = sum(1 for o in items if o.get("mast"))
     print(f"OSM's ways: {n_osm} lights added, {n_mast} masts")
+    fx_path = os.path.join(a.ref, "placement_fix.json")
+    fix_adds = [fx for fx in (json.load(open(fx_path))["fixes"] if os.path.exists(fx_path) else ())
+                if fx["action"] == "add"]
+    n_x, x_skipped = crossing_lights(osm_crossings(osm_xml, local) if os.path.exists(osm_xml) else [], items,
+                                     inside_box, plan.kind, ROAD, fix_adds)
+    print(f"signalled crossings: {n_x} poles at their kerbs; ends left out: {x_skipped}")
     n_l2 = 0
     # the signs where NDW's register has them (tools/ndw_signs.py: ref/ndw/signs.json): each where it stands, its code
     # and its plates; without the register the rules' zebra signs and keep-right noses below

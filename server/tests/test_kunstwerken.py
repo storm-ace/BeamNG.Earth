@@ -212,6 +212,28 @@ class FootprintTest(unittest.TestCase):
         self.assertAlmostEqual(a[7], hd[0], places=1)
         self.assertAlmostEqual(a[8], hd[1], places=1)
 
+    def test_crossing_heads_the_inverse_of_the_road_they_cross(self):
+        """A signalled crossing's heads (the user 2026-10-22, "we missen stoplichten") go to the approach driving over
+        it as its inverse ("inv": green while that traffic stands): the pedestrians' head with its own shape, not the
+        approach's own head; a crossing of a road no approach drives along gets none (not the cross road's)."""
+        self.k.signals = [(np.array([-3.0, -2.0, 4.2]), np.array([1.0, 0.0])),     # the car head: at westbound cars
+                          (np.array([-6.0, 4.0, 2.45]), np.array([0.0, -1.0])),    # a crossing at x -6 over that road
+                          (np.array([-6.0, -4.0, 1.75]), np.array([0.0, -1.0])),   # its cyclists' head at the south kerb
+                          (np.array([30.0, 4.0, 2.45]), np.array([1.0, 0.0]))]     # a crossing over a north-south road
+        self.k.signal_kinds = ["", "cross_ped", "cross_bike", "cross_ped"]
+        self.k.signal_across = [None, np.array([1.0, 0.0]), np.array([1.0, 0.0]), np.array([0.0, 1.0])]
+        stop = self.enu(2.0, 0.0)
+        a = ["c1"] + stop + [0.0, -1.0, 0.0, 0, None, None, None, None]
+        kunstwerken.hide_heads(self.frame, [{"j": "n1", "kind": "signal", "app": [a]}])
+        self.assertEqual(a[11], kunstwerken.HEAD_SHAPE, "the car head is the approach's own")
+        inv = [e for e in a[12] if len(e) > 5 and e[5] == "inv"]
+        self.assertEqual(sorted(e[4] for e in inv), sorted([kunstwerken.HEAD_SHAPE_PED, kunstwerken.HEAD_SHAPE_BIKE]))
+        ped = next(e for e in inv if e[4] == kunstwerken.HEAD_SHAPE_PED)
+        hp = self.enu(-6.0, 4.0)
+        self.assertAlmostEqual(ped[0], hp[0], places=1)
+        self.assertAlmostEqual(ped[2], 2.45, places=1)
+        self.assertEqual(len(a[12]), 2, "the north-south road's crossing: no approach drives it, none")
+
 
 class BareTest(unittest.TestCase):
     """The ground under a kunstwerk's rails is bare: the game's ground cover grew through them (in game 2026-10-22)."""
